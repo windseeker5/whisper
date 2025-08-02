@@ -1,0 +1,23 @@
+{
+  "microphone_device": "pyaudio:0",
+  "whisper_model": "small",
+  "language": "fr",
+  "sample_rate": 44100,
+  "channels": 1,
+  "chunk_size": 1102,
+  "vad_threshold": 0.01,
+  "silence_threshold": -30,
+  "min_silence_len": 500,
+  "notification_enabled": true,
+  "sound_feedback": true,
+  "microphone_gain": 1.0,
+  "auto_gain_control": false,
+  "target_rms_level": 0.15,
+  "gain_boost_db": 0.0,
+  "system_mic_boost": false,
+  "show_audio_levels": false,
+  "level_update_interval": 0.1,
+  "noise_gate_threshold": -35.0,
+  "compressor_enabled": false,
+  "normalize_audio": false
+}
