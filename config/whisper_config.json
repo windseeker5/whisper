@@ -19,5 +19,18 @@
   "level_update_interval": 0.1,
   "noise_gate_threshold": -35.0,
   "compressor_enabled": false,
-  "normalize_audio": false
+  "normalize_audio": false,
+  "advanced_silence_removal": {
+    "enabled": true,
+    "leading_silence_threshold_db": -40,
+    "trailing_silence_threshold_db": -40,
+    "internal_silence_threshold_db": -35,
+    "min_leading_silence_duration": 0.1,
+    "min_trailing_silence_duration": 0.1,
+    "max_internal_silence_reduction": 0.5,
+    "preserve_speech_padding_ms": 100,
+    "aggressiveness": "moderate",
+    "preserve_natural_rhythm": true,
+    "minimum_chunk_duration_ms": 200
+  }
 }

@@ -1246,6 +1246,257 @@ class AudioProcessor:
         
         return "\n".join(status_lines)
     
+    def advanced_silence_removal(self, audio_file: str) -> Optional[str]:
+        """Apply advanced silence removal with configurable thresholds and speech preservation.
+        
+        Args:
+            audio_file: Path to input audio file
+            
+        Returns:
+            Optional[str]: Path to processed audio file, or original file if processing fails
+        """
+        try:
+            # Get advanced silence removal configuration
+            silence_config = self.config.get('advanced_silence_removal', {})
+            
+            if not silence_config.get('enabled', False):
+                logging.debug("Advanced silence removal disabled, using basic processing")
+                return self.process_audio(audio_file)
+            
+            # Load audio
+            audio = AudioSegment.from_wav(audio_file)
+            original_duration = len(audio)
+            
+            logging.info(f"Starting advanced silence removal on {original_duration/1000:.2f}s audio")
+            
+            # Apply each step of silence removal
+            audio = self._remove_leading_silence(audio, silence_config)
+            audio = self._remove_trailing_silence(audio, silence_config)
+            audio = self._process_internal_silences(audio, silence_config)
+            
+            # Ensure minimum duration and quality
+            audio = self._validate_processed_audio(audio, silence_config)
+            
+            # Save processed audio
+            processed_file = audio_file.replace('.wav', '_silence_removed.wav')
+            audio.export(processed_file, format="wav")
+            
+            new_duration = len(audio)
+            reduction_percent = ((original_duration - new_duration) / original_duration) * 100
+            
+            logging.info(f"Advanced silence removal completed: {original_duration/1000:.2f}s → {new_duration/1000:.2f}s "
+                        f"({reduction_percent:.1f}% reduction)")
+            
+            return processed_file
+            
+        except Exception as e:
+            logging.error(f"Error in advanced silence removal: {e}")
+            return self.process_audio(audio_file)  # Fallback to basic processing
+    
+    def _remove_leading_silence(self, audio: AudioSegment, config: Dict[str, Any]) -> AudioSegment:
+        """Remove silence from the beginning of audio while preserving speech onset.
+        
+        Args:
+            audio: Input audio segment
+            config: Silence removal configuration
+            
+        Returns:
+            AudioSegment: Audio with leading silence removed
+        """
+        try:
+            threshold_db = config.get('leading_silence_threshold_db', -40)
+            min_duration = config.get('min_leading_silence_duration', 0.1) * 1000  # Convert to ms
+            padding_ms = config.get('preserve_speech_padding_ms', 100)
+            
+            # Find first non-silent segment
+            for i in range(0, len(audio), 50):  # Check every 50ms
+                chunk = audio[i:i+50]
+                if chunk.dBFS > threshold_db:
+                    # Found speech, preserve some padding before it
+                    cut_point = max(0, i - padding_ms)
+                    
+                    # Only cut if there's significant leading silence
+                    if cut_point > min_duration:
+                        logging.debug(f"Removed {cut_point}ms leading silence")
+                        return audio[cut_point:]
+                    else:
+                        return audio
+            
+            # If no speech found, return original
+            return audio
+            
+        except Exception as e:
+            logging.debug(f"Error removing leading silence: {e}")
+            return audio
+    
+    def _remove_trailing_silence(self, audio: AudioSegment, config: Dict[str, Any]) -> AudioSegment:
+        """Remove silence from the end of audio while preserving speech completion.
+        
+        Args:
+            audio: Input audio segment
+            config: Silence removal configuration
+            
+        Returns:
+            AudioSegment: Audio with trailing silence removed
+        """
+        try:
+            threshold_db = config.get('trailing_silence_threshold_db', -40)
+            min_duration = config.get('min_trailing_silence_duration', 0.1) * 1000  # Convert to ms
+            padding_ms = config.get('preserve_speech_padding_ms', 100)
+            
+            # Find last non-silent segment
+            for i in range(len(audio) - 50, 0, -50):  # Check every 50ms backwards
+                chunk = audio[i:i+50]
+                if chunk.dBFS > threshold_db:
+                    # Found speech, preserve some padding after it
+                    cut_point = min(len(audio), i + 50 + padding_ms)
+                    
+                    # Only cut if there's significant trailing silence
+                    silence_duration = len(audio) - cut_point
+                    if silence_duration > min_duration:
+                        logging.debug(f"Removed {silence_duration}ms trailing silence")
+                        return audio[:cut_point]
+                    else:
+                        return audio
+            
+            # If no speech found, return original
+            return audio
+            
+        except Exception as e:
+            logging.debug(f"Error removing trailing silence: {e}")
+            return audio
+    
+    def _process_internal_silences(self, audio: AudioSegment, config: Dict[str, Any]) -> AudioSegment:
+        """Intelligently process internal silences while preserving natural speech rhythm.
+        
+        Args:
+            audio: Input audio segment
+            config: Silence removal configuration
+            
+        Returns:
+            AudioSegment: Audio with internal silences processed
+        """
+        try:
+            threshold_db = config.get('internal_silence_threshold_db', -35)
+            max_reduction = config.get('max_internal_silence_reduction', 0.5)
+            preserve_rhythm = config.get('preserve_natural_rhythm', True)
+            min_chunk_duration = config.get('minimum_chunk_duration_ms', 200)
+            aggressiveness = config.get('aggressiveness', 'moderate')
+            
+            # Adjust parameters based on aggressiveness
+            if aggressiveness == 'conservative':
+                min_silence_len = 1500  # 1.5 seconds
+                keep_silence = 300      # Keep 300ms around speech
+            elif aggressiveness == 'aggressive':
+                min_silence_len = 800   # 0.8 seconds
+                keep_silence = 150      # Keep 150ms around speech
+            else:  # moderate
+                min_silence_len = 1200  # 1.2 seconds
+                keep_silence = 200      # Keep 200ms around speech
+            
+            # Split on silence with intelligent parameters
+            chunks = split_on_silence(
+                audio,
+                min_silence_len=min_silence_len,
+                silence_thresh=threshold_db,
+                keep_silence=keep_silence
+            )
+            
+            if not chunks:
+                logging.debug("No chunks found in internal silence processing")
+                return audio
+            
+            # Filter out chunks that are too short (likely noise)
+            valid_chunks = []
+            for chunk in chunks:
+                if len(chunk) >= min_chunk_duration:
+                    valid_chunks.append(chunk)
+                else:
+                    logging.debug(f"Filtered out {len(chunk)}ms chunk (too short)")
+            
+            if not valid_chunks:
+                logging.debug("No valid chunks after filtering")
+                return audio
+            
+            # Combine chunks with intelligent spacing
+            processed_audio = AudioSegment.empty()
+            
+            for i, chunk in enumerate(valid_chunks):
+                processed_audio += chunk
+                
+                # Add intelligent pause between chunks (except for last chunk)
+                if i < len(valid_chunks) - 1 and preserve_rhythm:
+                    # Calculate pause based on speech content and natural rhythm
+                    pause_duration = self._calculate_natural_pause(chunk, valid_chunks[i+1])
+                    
+                    if pause_duration > 0:
+                        silence_gap = AudioSegment.silent(duration=pause_duration)
+                        processed_audio += silence_gap
+            
+            return processed_audio
+            
+        except Exception as e:
+            logging.debug(f"Error processing internal silences: {e}")
+            return audio
+    
+    def _calculate_natural_pause(self, current_chunk: AudioSegment, next_chunk: AudioSegment) -> int:
+        """Calculate natural pause duration between speech chunks.
+        
+        Args:
+            current_chunk: Current speech segment
+            next_chunk: Next speech segment
+            
+        Returns:
+            int: Pause duration in milliseconds
+        """
+        try:
+            # Base pause duration
+            base_pause = 150  # 150ms
+            
+            # Analyze chunk characteristics for intelligent pausing
+            current_rms = current_chunk.rms
+            next_rms = next_chunk.rms
+            
+            # If there's a significant volume change, might indicate sentence boundary
+            if abs(current_rms - next_rms) > 500:
+                return base_pause + 50  # Add 50ms for sentence boundaries
+            
+            # For similar volume levels, use shorter pause
+            return base_pause
+            
+        except Exception:
+            return 150  # Default pause
+    
+    def _validate_processed_audio(self, audio: AudioSegment, config: Dict[str, Any]) -> AudioSegment:
+        """Validate processed audio meets quality requirements.
+        
+        Args:
+            audio: Processed audio segment
+            config: Silence removal configuration
+            
+        Returns:
+            AudioSegment: Validated audio segment
+        """
+        try:
+            min_duration = config.get('minimum_chunk_duration_ms', 200)
+            
+            # Ensure minimum duration
+            if len(audio) < min_duration:
+                logging.warning(f"Processed audio too short ({len(audio)}ms), padding to minimum")
+                padding_needed = min_duration - len(audio)
+                padding = AudioSegment.silent(duration=padding_needed)
+                audio = padding + audio + padding
+            
+            # Check for audio quality issues
+            if audio.rms == 0:
+                logging.warning("Processed audio has no content, this may indicate over-aggressive silence removal")
+            
+            return audio
+            
+        except Exception as e:
+            logging.debug(f"Error validating processed audio: {e}")
+            return audio
+    
     def cleanup(self):
         """Clean up audio resources."""
         if self.stream:
@@ -1762,6 +2013,57 @@ class WhisperApp:
             else:
                 print(f"Keeping current setting: {current_manual_setting}")
         
+        # Configure advanced silence removal
+        print("\n⚡ Advanced Silence Removal Settings:")
+        print("This feature automatically removes dead air and long pauses to improve efficiency.")
+        
+        silence_config = self.config.get('advanced_silence_removal', {})
+        current_enabled = silence_config.get('enabled', True)
+        current_aggressiveness = silence_config.get('aggressiveness', 'moderate')
+        
+        print(f"Current status: {'Enabled' if current_enabled else 'Disabled'}")
+        print(f"Current aggressiveness: {current_aggressiveness}")
+        
+        # Ask about enabling/disabling
+        enable_silence = input(f"Enable advanced silence removal? [y/n] (current: {'y' if current_enabled else 'n'}): ").strip().lower()
+        if enable_silence in ['y', 'yes']:
+            # Update existing config or use defaults
+            silence_settings = self.config.get('advanced_silence_removal', {
+                "enabled": True,
+                "leading_silence_threshold_db": -40,
+                "trailing_silence_threshold_db": -40,
+                "internal_silence_threshold_db": -35,
+                "min_leading_silence_duration": 0.1,
+                "min_trailing_silence_duration": 0.1,
+                "max_internal_silence_reduction": 0.5,
+                "preserve_speech_padding_ms": 100,
+                "aggressiveness": "moderate",
+                "preserve_natural_rhythm": True,
+                "minimum_chunk_duration_ms": 200
+            })
+            silence_settings['enabled'] = True
+            
+            # Ask about aggressiveness level
+            print("\nAggressiveness levels:")
+            print("  conservative - Removes only very long silences (1.5s+), preserves more natural pauses")
+            print("  moderate     - Balanced silence removal (1.2s+), good for most use cases")
+            print("  aggressive   - Removes shorter silences (0.8s+), maximum efficiency")
+            
+            aggressiveness = input(f"Choose aggressiveness level [conservative/moderate/aggressive] (current: {current_aggressiveness}): ").strip().lower()
+            if aggressiveness in ['conservative', 'moderate', 'aggressive']:
+                silence_settings['aggressiveness'] = aggressiveness
+            
+            self.config.set('advanced_silence_removal', silence_settings)
+            print(f"✅ Advanced silence removal enabled with {silence_settings['aggressiveness']} settings")
+            
+        elif enable_silence in ['n', 'no']:
+            silence_settings = self.config.get('advanced_silence_removal', {})
+            silence_settings['enabled'] = False
+            self.config.set('advanced_silence_removal', silence_settings)
+            print("❌ Advanced silence removal disabled")
+        else:
+            print(f"Keeping current setting: {'Enabled' if current_enabled else 'Disabled'}")
+        
         # Save configuration
         self.config.save_config()
         print("\nConfiguration saved successfully!")
@@ -1775,6 +2077,14 @@ class WhisperApp:
         print(f"   Real-time Levels: {'Enabled' if self.config.get('show_audio_levels', True) else 'Disabled'}")
         if self.config.get('show_audio_levels', True):
             print(f"   Manual Mode Levels: {self.config.get('manual_mode_levels', 'minimal')}")
+        
+        # Show silence removal settings
+        silence_config = self.config.get('advanced_silence_removal', {})
+        if silence_config.get('enabled', False):
+            aggressiveness = silence_config.get('aggressiveness', 'moderate')
+            print(f"   Silence Removal: Enabled ({aggressiveness})")
+        else:
+            print(f"   Silence Removal: Disabled")
         print("\nYou can now run the application with: python bin/voice_transcriber.py")
         print("For testing audio levels, try: python bin/voice_transcriber.py --manual")
     
@@ -1904,8 +2214,8 @@ class WhisperApp:
             
             # Removed processing notification for minimal UI
             
-            # Process audio
-            processed_file = self.audio_processor.process_audio(audio_file)
+            # Process audio with advanced silence removal
+            processed_file = self.audio_processor.advanced_silence_removal(audio_file)
             if not processed_file:
                 # No notification for failed audio detection (minimal UI)
                 return
