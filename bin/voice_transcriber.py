@@ -162,6 +162,7 @@ class WhisperConfig:
             "min_silence_len": 500,
             "notification_enabled": True,
             "sound_feedback": True,
+            "sound_feedback_verbose": True,  # Show sound feedback messages in logs
             # Audio level and gain settings
             "microphone_gain": 1.0,  # Software gain multiplier (1.0 = no gain, 2.0 = double volume)
             "auto_gain_control": True,  # Enable automatic gain control
@@ -993,8 +994,13 @@ class AudioProcessor:
             logging.error("Try running: python bin/audio_diagnostics.py --fix-config")
             return False
     
-    def stop_recording(self) -> Optional[str]:
-        """Stop recording and save audio file."""
+    def stop_recording(self) -> Optional[tuple[str, str]]:
+        """Stop recording and save audio file.
+        
+        Returns:
+            Tuple of (file_path, timestamp) if successful, None if failed.
+            The timestamp is in format 'YYYY-mm-dd HH:MM:SS' for logging consistency.
+        """
         if not self.is_recording:
             return None
             
@@ -1017,10 +1023,14 @@ class AudioProcessor:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
             
             # Save to temporary file using validated sample rate
-            timestamp = datetime.now().strftime("%Y%m%d_%H_M%S")
+            # Generate both filename timestamp and log timestamp from the same datetime
+            now = datetime.now()
+            filename_timestamp = now.strftime("%Y%m%d_%H_M%S")
+            log_timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            
             rec_dir = Path("rec")
             rec_dir.mkdir(exist_ok=True)
-            audio_file = rec_dir / f"recording_{timestamp}.wav"
+            audio_file = rec_dir / f"recording_{filename_timestamp}.wav"
             
             # Convert to float32 and normalize to prevent clipping
             audio_float = audio_array.astype(np.float32) / 32768.0
@@ -1036,7 +1046,7 @@ class AudioProcessor:
             sample_rate = self.validated_config['sample_rate'] if self.validated_config else self.config.get('sample_rate')
             sf.write(str(audio_file), audio_float, sample_rate)
             logging.info(f"Recording saved to {audio_file} (sample rate: {sample_rate} Hz, gain: {microphone_gain}x)")
-            return str(audio_file)
+            return (str(audio_file), log_timestamp)
             
         except Exception as e:
             logging.error(f"Error stopping recording: {e}")
@@ -1208,7 +1218,7 @@ class AudioProcessor:
         validation = self.validate_audio_enhancements()
         
         status_lines = []
-        status_lines.append("🎤 Audio Enhancement Status:")
+        status_lines.append("🎙️ Audio Enhancement Status:")
         
         if validation['level_monitoring']:
             status_lines.append("   ✓ Real-time audio level monitoring")
@@ -1600,8 +1610,13 @@ class DesktopIntegration:
             return False
     
     @staticmethod
-    def play_sound(sound_type: str) -> None:
-        """Play system sound for feedback using freedesktop sounds."""
+    def play_sound(sound_type: str, verbose: bool = True) -> None:
+        """Play system sound for feedback using freedesktop sounds.
+        
+        Args:
+            sound_type: Type of sound to play ('start' or 'stop')
+            verbose: Whether to log sound feedback messages
+        """
         try:
             sound_file = None
             if sound_type == "start":
@@ -1628,17 +1643,18 @@ class DesktopIntegration:
                             stderr=subprocess.DEVNULL
                         )
                         # Don't wait for completion to avoid blocking
-                        logging.debug(f"Sound feedback played: {sound_file}")
+                        if verbose:
+                            logging.info(f"Sound feedback played: {sound_file}")
                         break
                     except (subprocess.SubprocessError, FileNotFoundError):
                         continue
                 else:
-                    logging.debug(f"No available audio player found for sound feedback")
+                    logging.warning(f"No available audio player found for sound feedback")
             else:
-                logging.debug(f"Sound file not found: {sound_file}")
+                logging.warning(f"Sound file not found: {sound_file}")
                 
         except Exception as e:
-            logging.debug(f"Sound feedback not available: {e}")
+            logging.warning(f"Sound feedback not available: {e}")
 
 
 class TranscriptionLogger:
@@ -1648,10 +1664,20 @@ class TranscriptionLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
     
-    def log_transcription(self, text: str, audio_file: str) -> None:
-        """Log transcription with timestamp."""
+    def log_transcription(self, text: str, audio_file: str, timestamp: str = None) -> None:
+        """Log transcription with timestamp.
+        
+        Args:
+            text: Transcribed text
+            audio_file: Path to the audio file
+            timestamp: Optional timestamp in 'YYYY-mm-dd HH:MM:SS' format.
+                      If not provided, current time will be used.
+        """
         try:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Use provided timestamp or generate new one if not provided
+            if timestamp is None:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
             date_str = datetime.now().strftime("%Y-%m-%d")
             log_file = self.log_dir / f"transcriptions_{date_str}.txt"
             
@@ -2190,11 +2216,12 @@ class WhisperApp:
             # Start recording
             if self.audio_processor.start_recording():
                 if self.config.get('sound_feedback'):
-                    self.desktop.play_sound("start")
+                    verbose = self.config.get('sound_feedback_verbose', True)
+                    self.desktop.play_sound("start", verbose)
                 if self.config.get('notification_enabled'):
                     self.desktop.send_notification(
                         "", 
-                        "🎤", 
+                        "🎙️", 
                         "normal"
                     )
         else:
@@ -2205,12 +2232,16 @@ class WhisperApp:
         """Process the recorded audio and transcribe."""
         try:
             # Stop recording
-            audio_file = self.audio_processor.stop_recording()
-            if not audio_file:
+            recording_result = self.audio_processor.stop_recording()
+            if not recording_result:
                 return
             
+            # Unpack the tuple containing file path and timestamp
+            audio_file, audio_timestamp = recording_result
+            
             if self.config.get('sound_feedback'):
-                self.desktop.play_sound("stop")
+                verbose = self.config.get('sound_feedback_verbose', True)
+                self.desktop.play_sound("stop", verbose)
             
             # Removed processing notification for minimal UI
             
@@ -2226,8 +2257,8 @@ class WhisperApp:
                 # Copy to clipboard
                 self.desktop.copy_to_clipboard(text)
                 
-                # Log transcription
-                self.logger.log_transcription(text, audio_file)
+                # Log transcription with original audio file timestamp
+                self.logger.log_transcription(text, audio_file, audio_timestamp)
                 
                 # Show notification
                 if self.config.get('notification_enabled'):

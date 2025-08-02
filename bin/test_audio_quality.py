@@ -27,7 +27,7 @@ from bin.audio_diagnostics import AudioDiagnostics
 
 def test_recording_quality():
     """Test recording quality with new settings."""
-    print("🎤 Testing Audio Recording Quality")
+    print("🎙️ Testing Audio Recording Quality")
     print("=" * 50)
     
     try:
