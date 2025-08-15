@@ -2296,27 +2296,49 @@ class WhisperApp:
             )
     
     def setup_hotkey(self) -> None:
-        """Setup global hotkey listener."""
+        """Setup global hotkey listener with Wayland/Hyprland support."""
         try:
-            # For Wayland/Hyprland, we need to use a different approach
-            # This is a simplified implementation - in practice, you might need
-            # to integrate with Hyprland's IPC or use a different method
+            # Import the Wayland-compatible hotkey handler
+            import sys
+            import os
+            sys.path.append(os.path.dirname(__file__))
+            from wayland_hotkey_handler import create_wayland_hotkey_handler
             
             def on_hotkey():
                 self.toggle_recording()
             
-            # Using pynput for now - may need adjustment for Wayland
-            self.hotkey_listener = keyboard.GlobalHotKeys({
-                '<super>+a': on_hotkey
-            })
-            
-            self.hotkey_listener.start()
-            logging.info("Global hotkey (SUPER+A) registered")
+            # Detect environment and use appropriate hotkey method
+            if self._is_wayland_session():
+                logging.info("Wayland session detected, using Wayland-compatible hotkey handler")
+                self.hotkey_handler = create_wayland_hotkey_handler()
+                success = self.hotkey_handler.setup_hotkey(on_hotkey)
+                
+                if success:
+                    logging.info("Wayland-compatible hotkey (SUPER+A) registered successfully")
+                else:
+                    raise Exception("Failed to setup Wayland hotkey handler")
+            else:
+                # Fallback to pynput for X11 sessions
+                logging.info("X11 session detected, using pynput hotkey handler")
+                self.hotkey_listener = keyboard.GlobalHotKeys({
+                    '<super>+a': on_hotkey
+                })
+                self.hotkey_listener.start()
+                logging.info("Global hotkey (SUPER+A) registered with pynput")
             
         except Exception as e:
             logging.error(f"Error setting up hotkey: {e}")
-            print("Warning: Global hotkey may not work properly on Wayland.")
-            print("You can still use the application by running with --manual mode.")
+            print("Warning: Global hotkey setup failed.")
+            print("Available alternatives:")
+            print("1. Run with --manual mode: python bin/voice_transcriber.py --manual")
+            print("2. Use Hyprland keybind: bind = SUPER, a, exec, pkill -SIGUSR1 -f voice_transcriber.py")
+            print("3. Check if your Wayland compositor supports global hotkeys")
+    
+    def _is_wayland_session(self) -> bool:
+        """Detect if running under Wayland."""
+        return (os.environ.get('WAYLAND_DISPLAY') is not None or 
+                os.environ.get('XDG_SESSION_TYPE') == 'wayland' or
+                os.environ.get('HYPRLAND_INSTANCE_SIGNATURE') is not None)
     
     def _resolve_hardware_device_name(self, device_name: str, device_index: int) -> str:
         """
@@ -2718,8 +2740,14 @@ class WhisperApp:
     def cleanup(self) -> None:
         """Clean up application resources."""
         self.is_running = False
-        if self.hotkey_listener:
+        
+        # Clean up hotkey handlers
+        if hasattr(self, 'hotkey_listener') and self.hotkey_listener:
             self.hotkey_listener.stop()
+        
+        if hasattr(self, 'hotkey_handler') and self.hotkey_handler:
+            self.hotkey_handler.cleanup()
+        
         self.audio_processor.cleanup()
         logging.info("Application shutdown complete")
 
