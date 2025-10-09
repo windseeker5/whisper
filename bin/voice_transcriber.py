@@ -1683,11 +1683,16 @@ class DesktopIntegration:
 
 class TranscriptionLogger:
     """Logging system for transcriptions."""
-    
+
     def __init__(self, log_dir: str = "log"):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
-    
+
+    def get_today_log_file(self) -> Path:
+        """Get the log file path for today."""
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        return self.log_dir / f"transcriptions_{date_str}.txt"
+
     def log_transcription(self, text: str, audio_file: str, timestamp: str = None) -> None:
         """Log transcription with timestamp.
         
@@ -1765,59 +1770,75 @@ class HotkeyListeningTUI:
             try:
                 log_file = self.app.logger.get_today_log_file()
                 if log_file.exists():
-                    with open(log_file, 'r') as f:
-                        lines = f.readlines()
-                        # Get last transcription
-                        if lines:
-                            has_transcriptions = True
-                            last_line = lines[-1].strip()
-                            if last_line:
-                                # Parse: timestamp | text
-                                parts = last_line.split('|', 1)
-                                if len(parts) == 2:
-                                    text = parts[1].strip()
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
 
-                                    print("\n┌─ Latest Transcription " + "─" * 43 + "┐")
-                                    # Word wrap
-                                    words = text.split()
-                                    line = ""
-                                    for word in words:
-                                        if len(line + word) > 65:
-                                            print(f"│ {line:<66} │")
-                                            line = word + " "
-                                        else:
-                                            line += word + " "
-                                    if line.strip():
-                                        print(f"│ {line.strip():<66} │")
-                                    print("└" + "─" * 68 + "┘")
-                                    print("✓ Copied to clipboard")
+                    # Parse multi-line format: [timestamp] filename\nText: text\n---\n
+                    entries = []
+                    blocks = content.split('-' * 50)
+                    for block in blocks:
+                        block = block.strip()
+                        if not block:
+                            continue
+                        lines = block.split('\n')
+                        if len(lines) >= 2:
+                            # Extract timestamp from first line: [2025-10-08 22:08:05]
+                            timestamp_line = lines[0]
+                            if '[' in timestamp_line and ']' in timestamp_line:
+                                timestamp = timestamp_line[timestamp_line.find('[')+1:timestamp_line.find(']')]
+                                # Extract text from "Text: ..." line
+                                text_line = lines[1] if len(lines) > 1 else ""
+                                if text_line.startswith('Text: '):
+                                    text = text_line[6:].strip()
+                                    entries.append({'timestamp': timestamp, 'text': text})
+
+                    if entries:
+                        has_transcriptions = True
+                        # Show latest transcription
+                        latest = entries[-1]
+                        text = latest['text']
+
+                        print("\n┌─ Latest Transcription " + "─" * 43 + "┐")
+                        # Word wrap
+                        words = text.split()
+                        line = ""
+                        for word in words:
+                            if len(line + word) > 65:
+                                print(f"│ {line:<66} │")
+                                line = word + " "
+                            else:
+                                line += word + " "
+                        if line.strip():
+                            print(f"│ {line.strip():<66} │")
+                        print("└" + "─" * 68 + "┘")
+                        print("✓ Copied to clipboard")
 
                         # Show last 10 transcriptions with full text
-                        if len(lines) > 1:
+                        if len(entries) > 1:
                             print("\n─── Transcription History (scroll up to see more) ───")
-                            history_count = min(10, len(lines) - 1)
-                            for i, line in enumerate(lines[-history_count-1:-1], 1):
-                                parts = line.strip().split('|', 1)
-                                if len(parts) == 2:
-                                    timestamp = parts[0].strip()
-                                    text = parts[1].strip()
-                                    # Show full text, wrapped for readability
-                                    time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
-                                    print(f"\n  #{i} [{time_only}]")
-                                    # Word wrap the full text
-                                    words = text.split()
-                                    line_text = "  "
-                                    for word in words:
-                                        if len(line_text + word) > 68:
-                                            print(line_text)
-                                            line_text = "  " + word + " "
-                                        else:
-                                            line_text += word + " "
-                                    if line_text.strip():
+                            history_count = min(10, len(entries) - 1)
+                            for i, entry in enumerate(entries[-history_count-1:-1], 1):
+                                timestamp = entry['timestamp']
+                                text = entry['text']
+                                # Show full text, wrapped for readability
+                                time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
+                                print(f"\n  #{i} [{time_only}]")
+                                # Word wrap the full text
+                                words = text.split()
+                                line_text = "  "
+                                for word in words:
+                                    if len(line_text + word) > 68:
                                         print(line_text)
+                                        line_text = "  " + word + " "
+                                    else:
+                                        line_text += word + " "
+                                if line_text.strip():
+                                    print(line_text)
 
             except Exception as e:
-                logging.debug(f"Error reading log: {e}")
+                logging.error(f"Error reading log: {e}")
+                import traceback
+                traceback.print_exc()
 
             if not self.app.audio_processor.is_recording and not has_transcriptions:
                 print("\n[Waiting for recording... Press SUPER+A to start]")
