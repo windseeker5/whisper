@@ -113,9 +113,25 @@ try:
     finally:
         sys.stderr.close()
         sys.stderr = stderr_backup
-    import whisper
+
+    # Import whisper optionally (only needed for direct WhisperTranscriber, not backend abstraction)
+    try:
+        import whisper
+        WHISPER_AVAILABLE = True
+    except ImportError:
+        WHISPER_AVAILABLE = False
+        whisper = None  # Set to None so code doesn't crash on reference
+
     import numpy as np
-    from pynput import keyboard
+
+    # Import pynput optionally (only needed for hotkey mode, not TUI)
+    try:
+        from pynput import keyboard
+        PYNPUT_AVAILABLE = True
+    except Exception:  # Catch any error (ImportError, DisplayNameError, etc.)
+        PYNPUT_AVAILABLE = False
+        keyboard = None
+
     import pyperclip
     import sounddevice as sd
     import soundfile as sf
@@ -139,7 +155,8 @@ try:
 
 except ImportError as e:
     print(f"Missing required dependency: {e}")
-    print("Please install dependencies with: pip install -r requirements.txt")
+    print("Please install core dependencies with: pip install -r requirements-core.txt")
+    print("For Whisper backend (optional): ./install-whisper.sh")
     sys.exit(1)
 
 
@@ -1516,14 +1533,21 @@ class AudioProcessor:
 
 class WhisperTranscriber:
     """OpenAI Whisper transcription functionality."""
-    
+
     def __init__(self, config: WhisperConfig):
         self.config = config
         self.model = None
         self.load_model()
-    
+
     def load_model(self) -> None:
         """Load Whisper model."""
+        if not WHISPER_AVAILABLE or whisper is None:
+            logging.error("Whisper is not installed. Install with: ./install-whisper.sh")
+            print("\nERROR: Whisper backend not available")
+            print("Install with: ./install-whisper.sh")
+            print("Or switch to Vosk: python bin/setup_backend.py --backend vosk")
+            sys.exit(1)
+
         try:
             model_name = self.config.get('whisper_model', 'base')
             logging.info(f"Loading Whisper model: {model_name}")
@@ -1692,22 +1716,176 @@ class TranscriptionLogger:
             logging.error(f"Error logging transcription: {e}")
 
 
+class HotkeyListeningTUI:
+    """TUI that displays transcriptions from hotkey-triggered recordings."""
+
+    def __init__(self, app):
+        """Initialize with WhisperApp instance."""
+        self.app = app
+        self.running = True
+        self.display_lock = threading.Lock()
+        self.transcription_history = []
+
+        # Hook into app's process_recording to capture transcriptions
+        original_process = app.process_recording
+        tui_self = self
+
+        def process_with_display():
+            """Wrapper that updates display after transcription."""
+            # Call original process
+            original_process()
+
+            # Update display after processing
+            time.sleep(0.5)  # Give time for transcription to complete
+            tui_self.update_display()
+
+        app.process_recording = process_with_display
+
+    def clear_screen(self):
+        """Clear terminal screen."""
+        os.system('clear' if os.name != 'nt' else 'cls')
+
+    def update_display(self):
+        """Update the TUI display."""
+        with self.display_lock:
+            self.clear_screen()
+
+            # Header
+            backend = self.app.config.get('backend', 'vosk').upper()
+            status = "🔴 RECORDING" if self.app.audio_processor.is_recording else "⚫ READY"
+
+            print("=" * 70)
+            print(f"  Voice Transcriber - {backend} Backend")
+            print(f"  Status: {status}")
+            print(f"  Hotkey: SUPER+A (start/stop recording)")
+            print("=" * 70)
+
+            # Get recent transcriptions from log
+            has_transcriptions = False
+            try:
+                log_file = self.app.logger.get_today_log_file()
+                if log_file.exists():
+                    with open(log_file, 'r') as f:
+                        lines = f.readlines()
+                        # Get last transcription
+                        if lines:
+                            has_transcriptions = True
+                            last_line = lines[-1].strip()
+                            if last_line:
+                                # Parse: timestamp | text
+                                parts = last_line.split('|', 1)
+                                if len(parts) == 2:
+                                    text = parts[1].strip()
+
+                                    print("\n┌─ Latest Transcription " + "─" * 43 + "┐")
+                                    # Word wrap
+                                    words = text.split()
+                                    line = ""
+                                    for word in words:
+                                        if len(line + word) > 65:
+                                            print(f"│ {line:<66} │")
+                                            line = word + " "
+                                        else:
+                                            line += word + " "
+                                    if line.strip():
+                                        print(f"│ {line.strip():<66} │")
+                                    print("└" + "─" * 68 + "┘")
+                                    print("✓ Copied to clipboard")
+
+                        # Show last 10 transcriptions with full text
+                        if len(lines) > 1:
+                            print("\n─── Transcription History (scroll up to see more) ───")
+                            history_count = min(10, len(lines) - 1)
+                            for i, line in enumerate(lines[-history_count-1:-1], 1):
+                                parts = line.strip().split('|', 1)
+                                if len(parts) == 2:
+                                    timestamp = parts[0].strip()
+                                    text = parts[1].strip()
+                                    # Show full text, wrapped for readability
+                                    time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
+                                    print(f"\n  #{i} [{time_only}]")
+                                    # Word wrap the full text
+                                    words = text.split()
+                                    line_text = "  "
+                                    for word in words:
+                                        if len(line_text + word) > 68:
+                                            print(line_text)
+                                            line_text = "  " + word + " "
+                                        else:
+                                            line_text += word + " "
+                                    if line_text.strip():
+                                        print(line_text)
+
+            except Exception as e:
+                logging.debug(f"Error reading log: {e}")
+
+            if not self.app.audio_processor.is_recording and not has_transcriptions:
+                print("\n[Waiting for recording... Press SUPER+A to start]")
+
+            # Footer
+            print("\n" + "─" * 70)
+            print("  Press Ctrl+C to quit  |  Scroll up to copy previous transcriptions")
+            print("=" * 70)
+
+    def run(self):
+        """Main display loop."""
+        # Initial display
+        self.update_display()
+
+        # Monitor for changes and update display
+        last_recording_state = False
+
+        try:
+            while self.running and self.app.is_running:
+                time.sleep(0.3)
+
+                # Update display when recording state changes
+                current_state = self.app.audio_processor.is_recording
+                if current_state != last_recording_state:
+                    self.update_display()
+                    last_recording_state = current_state
+
+        except KeyboardInterrupt:
+            print("\n\nShutting down...")
+            self.running = False
+            self.app.is_running = False
+
+
 class WhisperApp:
     """Main application class."""
-    
+
     def __init__(self):
         self.config = WhisperConfig()
         self.audio_processor = AudioProcessor(self.config)
-        self.transcriber = WhisperTranscriber(self.config)
+
+        # Use backend abstraction - check if backend is specified in config
+        backend_type = self.config.get('backend', 'whisper')
+        try:
+            # Try to use new backend system if available
+            from transcription_backends import BackendFactory
+            self.transcriber = BackendFactory.create_backend(self.config.config)
+            logging.info(f"Using {backend_type} backend via abstraction layer")
+
+            # CRITICAL: Load the model
+            if not self.transcriber.load_model():
+                logging.error(f"Failed to load {backend_type} model")
+                raise RuntimeError(f"Failed to load {backend_type} model")
+
+        except ImportError as e:
+            # Fallback to direct Whisper if backend module not available
+            logging.warning(f"Backend abstraction not available: {e}, using direct Whisper")
+            self.transcriber = WhisperTranscriber(self.config)
+
         self.desktop = DesktopIntegration()
         self.logger = TranscriptionLogger()
         self.is_running = False
         self.hotkey_listener = None
         self.daemon_mode = False
-        
+        self.last_transcription = ""  # For TUI display
+
         # Setup logging
         self.setup_logging()
-        
+
         # Setup signal handlers for daemon mode
         signal.signal(signal.SIGUSR1, self.signal_toggle_recording)
         signal.signal(signal.SIGTERM, self.signal_shutdown)
@@ -1737,7 +1915,10 @@ class WhisperApp:
     
     def configure_application(self) -> None:
         """Interactive configuration setup with compatibility validation."""
-        print("\n=== Whisper Voice-to-Text Configuration ===\n")
+        current_backend = self.config.get('backend', 'vosk')
+        print(f"\n=== Voice-to-Text Configuration ===")
+        print(f"Current backend: {current_backend.upper()}")
+        print(f"(To switch backend: python bin/setup_backend.py --backend vosk|whisper)\n")
         
         # Show audio system information
         audio_info = self.audio_processor.get_audio_system_info()
@@ -1867,24 +2048,36 @@ class WhisperApp:
             except ValueError:
                 print("Please enter a valid number.")
         
-        # Whisper model selection
-        print("\nAvailable Whisper models:")
-        models = ["tiny", "base", "small", "medium", "large"]
-        for i, model in enumerate(models):
-            print(f"{i + 1}. {model}")
-        
-        while True:
-            try:
-                choice = input("Select Whisper model (number): ").strip()
-                model_index = int(choice) - 1
-                if 0 <= model_index < len(models):
-                    self.config.set('whisper_model', models[model_index])
-                    print(f"Selected: {models[model_index]}")
-                    break
-                else:
-                    print("Invalid selection. Please try again.")
-            except ValueError:
-                print("Please enter a valid number.")
+        # Backend-specific model selection
+        current_backend = self.config.get('backend', 'vosk')
+
+        if current_backend == 'whisper':
+            print("\nAvailable Whisper models:")
+            models = ["tiny", "base", "small", "medium", "large"]
+            print("  Recommended for your 4GB RAM system: tiny or base")
+            for i, model in enumerate(models):
+                print(f"{i + 1}. {model}")
+
+            while True:
+                try:
+                    choice = input("Select Whisper model (number) [2 for base]: ").strip()
+                    if not choice:
+                        choice = "2"  # Default to base
+                    model_index = int(choice) - 1
+                    if 0 <= model_index < len(models):
+                        self.config.set('whisper_model', models[model_index])
+                        print(f"Selected: {models[model_index]}")
+                        break
+                    else:
+                        print("Invalid selection. Please try again.")
+                except ValueError:
+                    print("Please enter a valid number.")
+        else:
+            # Vosk backend - no model selection needed (handled by setup_backend.py)
+            vosk_model = self.config.get('vosk_model_path', 'models/vosk-model-small-en-us-0.15')
+            print(f"\n✓ Using Vosk backend")
+            print(f"  Model: {vosk_model}")
+            print(f"  (To change Vosk model: python bin/setup_backend.py --interactive)")
         
         # Language selection
         print("\nLanguage options:")
@@ -2232,34 +2425,45 @@ class WhisperApp:
         """Process the recorded audio and transcribe."""
         try:
             # Stop recording
+            logging.info("Stopping recording...")
             recording_result = self.audio_processor.stop_recording()
             if not recording_result:
+                logging.warning("No recording result returned")
                 return
-            
+
             # Unpack the tuple containing file path and timestamp
             audio_file, audio_timestamp = recording_result
-            
+            logging.info(f"Recording saved: {audio_file}")
+
             if self.config.get('sound_feedback'):
                 verbose = self.config.get('sound_feedback_verbose', True)
                 self.desktop.play_sound("stop", verbose)
-            
+
             # Removed processing notification for minimal UI
-            
+
             # Process audio with advanced silence removal
+            logging.info("Processing audio (silence removal)...")
             processed_file = self.audio_processor.advanced_silence_removal(audio_file)
             if not processed_file:
+                logging.warning("No audio detected after silence removal")
                 # No notification for failed audio detection (minimal UI)
                 return
-            
+
+            logging.info(f"Processed file: {processed_file}")
+
             # Transcribe
+            logging.info("Starting transcription...")
             text = self.transcriber.transcribe_audio(processed_file)
             if text:
+                logging.info(f"Transcription successful: {text}")
+                self.last_transcription = text  # Store for TUI
+
                 # Copy to clipboard
                 self.desktop.copy_to_clipboard(text)
-                
+
                 # Log transcription with original audio file timestamp
                 self.logger.log_transcription(text, audio_file, audio_timestamp)
-                
+
                 # Show notification
                 if self.config.get('notification_enabled'):
                     # Show first few words with clipboard emoji
@@ -2268,13 +2472,14 @@ class WhisperApp:
                     if len(words) > 6:
                         preview += "..."
                     self.desktop.send_notification(
-                        "", 
-                        f"📋 > {preview}", 
+                        "",
+                        f"📋 > {preview}",
                         "normal"
                     )
-                
+
                 print(f"Transcribed: {text}")
             else:
+                logging.warning("Transcription returned empty result")
                 # No notification for failed speech detection (minimal UI)
                 pass
             
@@ -2736,7 +2941,28 @@ class WhisperApp:
             print("\nShutting down...")
         finally:
             self.cleanup()
-    
+
+    def run_tui_mode(self) -> None:
+        """Run application with TUI display and hotkey listening."""
+        print("Launching TUI with hotkey support...")
+        print("Press SUPER+A to start/stop recording")
+        print()
+
+        # Mark app as running
+        self.is_running = True
+
+        # Setup hotkey handler (using signals for Wayland/Sway)
+        self.setup_hotkey()
+
+        # Start TUI display in main thread
+        try:
+            tui = HotkeyListeningTUI(self)
+            tui.run()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+        finally:
+            self.cleanup()
+
     def cleanup(self) -> None:
         """Clean up application resources."""
         self.is_running = False
@@ -2799,7 +3025,13 @@ Audio Enhancement Features:
         action='store_true',
         help='Test audio levels and sensitivity (shows real-time levels without transcription)'
     )
-    
+
+    parser.add_argument(
+        '--tui',
+        action='store_true',
+        help='Run with interactive TUI dashboard (3-panel interface with live monitoring)'
+    )
+
     parser.add_argument(
         '--version',
         action='version',
@@ -2807,17 +3039,20 @@ Audio Enhancement Features:
     )
     
     args = parser.parse_args()
-    
+
     # Ensure we're in the correct directory
     script_dir = Path(__file__).parent.parent
     os.chdir(script_dir)
-    
+
     app = WhisperApp()
-    
+
     if args.config:
         app.configure_application()
     elif args.test_audio:
         app.run_audio_test_mode()
+    elif args.tui:
+        # Launch TUI mode
+        app.run_tui_mode()
     else:
         app.run(manual_mode=args.manual, daemon_mode=args.daemon)
 

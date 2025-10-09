@@ -1,0 +1,6 @@
+# Whisper backend (optional) - Only install if you have 6GB+ RAM
+# WARNING: This will download torch (~888 MB) which may timeout
+# Use install-whisper.sh script instead for reliable installation
+
+openai-whisper>=20231117
+librosa>=0.10.0

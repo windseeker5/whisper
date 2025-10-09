@@ -1,4 +1,18 @@
-openai-whisper>=20231117
+# DEPRECATED: Use requirements-core.txt or requirements-whisper.txt instead
+#
+# This file kept for reference only. The installation has been split to avoid
+# timeout issues with the large torch download (~888 MB).
+#
+# For most users (especially 4GB RAM systems):
+#   pip install -r requirements-core.txt
+#
+# For Whisper backend (optional, requires 6GB+ RAM):
+#   ./install-whisper.sh
+#   OR: pip install -r requirements-whisper.txt
+#
+# ============================================================================
+
+# Core dependencies (required)
 pyaudio>=0.2.11
 sounddevice>=0.4.6
 soundfile>=0.12.1
@@ -8,6 +22,20 @@ pyperclip>=1.8.2
 numpy>=1.24.0
 audioop-lts>=0.2.1
 psutil>=5.9.0
+
+# TUI dependencies (required for --tui mode)
+textual>=0.50.0
+rich>=13.7.0
+
+# Transcription backends (install at least one)
+# Vosk - Lightweight, fast, works well on old hardware (RECOMMENDED for 4GB RAM)
+vosk>=0.3.45
+
+# Whisper - High accuracy, resource intensive (requires 6GB+ RAM)
+# WARNING: Installing whisper will download torch (~888 MB) which may timeout!
+# Use install-whisper.sh script instead for reliable installation.
+openai-whisper>=20231117
+
 # Additional dependencies for enhanced audio processing
 scipy>=1.10.0  # For advanced audio processing (optional)
-librosa>=0.10.0  # For audio analysis (optional)
+librosa>=0.10.0  # For audio analysis (optional - only needed with whisper)
