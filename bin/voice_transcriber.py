@@ -1773,6 +1773,8 @@ class HotkeyListeningTUI:
                         char = sys.stdin.read(1).lower()
                         if char == 'd' and self.keyboard_listener_active:
                             self.delete_history()
+                        elif char == 'c' and self.keyboard_listener_active:
+                            self.open_configuration()
                         elif char == '\x03':  # Ctrl+C
                             self.running = False
                             break
@@ -1782,6 +1784,84 @@ class HotkeyListeningTUI:
 
         self.keyboard_thread = threading.Thread(target=listen_for_keys, daemon=True)
         self.keyboard_thread.start()
+
+    def open_configuration(self):
+        """Open a simplified configuration menu for TUI."""
+        # Stop the keyboard listener
+        self.keyboard_listener_active = False
+        time.sleep(0.2)
+
+        import sys
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            while True:
+                self.clear_screen()
+                print("\n╭" + "─" * 68 + "╮")
+                print("│" + " " * 68 + "│")
+                print("│  Configuration Menu" + " " * 47 + "│")
+                print("│" + " " * 68 + "│")
+                print("╰" + "─" * 68 + "╯")
+
+                # Get available microphones
+                import pyaudio
+                p = pyaudio.PyAudio()
+                devices = []
+                current_device = self.app.config.get('microphone_device', 'pyaudio:0')
+                current_index = int(current_device.split(':')[1]) if ':' in current_device else 0
+
+                print("\n Available Microphones:")
+                print(" " + "─" * 68)
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info['maxInputChannels'] > 0:
+                        marker = "→" if i == current_index else " "
+                        print(f" {marker} [{i}] {info['name']}")
+                        devices.append(i)
+                p.terminate()
+
+                print("\n " + "─" * 68)
+                print(f" Current backend: {self.app.config.get('backend', 'whisper').upper()}")
+                print(f" Sample rate: {self.app.config.get('sample_rate', 48000)} Hz")
+                print(f" Microphone gain: {self.app.config.get('microphone_gain', 1.0)}")
+                print(" " + "─" * 68)
+
+                print("\n Options:")
+                print("  [1-9] Select microphone by number")
+                print("  [ESC or Q] Return to TUI")
+                print("\n > ", end='', flush=True)
+
+                # Get input
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                tty.setcbreak(fd)
+                char = sys.stdin.read(1)
+
+                if char in ['\x1b', 'q', 'Q']:  # ESC or Q
+                    break
+                elif char.isdigit():
+                    device_num = int(char)
+                    if device_num in devices:
+                        # Update config
+                        self.app.config.config['microphone_device'] = f"pyaudio:{device_num}"
+                        self.app.config.save_config()
+                        print(f"\n✓ Microphone changed to device {device_num}")
+                        time.sleep(1)
+                    else:
+                        print(f"\n✗ Invalid device number")
+                        time.sleep(1)
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        # Restart keyboard listener
+        self.keyboard_listener_active = True
+        self.start_keyboard_listener()
+
+        self.update_display()
 
     def delete_history(self):
         """Delete all recording files and log history."""
@@ -1815,7 +1895,7 @@ class HotkeyListeningTUI:
 
         print("│" + " " * 68 + "│")
 
-        text8 = "  Press Y to delete, N to cancel"
+        text8 = "  Press Y to delete, N to cancel (no Enter needed)"
         padding8 = 68 - len(text8)
         print("│" + text8 + " " * padding8 + "│")
 
@@ -1893,7 +1973,7 @@ class HotkeyListeningTUI:
             print("├" + "─" * 68 + "┤")
             line3 = "Hotkey: SUPER+A (start/stop recording)"
             print(f"│  {line3:<66}│")
-            line4 = "Controls: Ctrl+C (quit)  |  D (delete history)"
+            line4 = "Controls: Ctrl+C (quit)  |  C (config)  |  D (delete)"
             print(f"│  {line4:<66}│")
             print("╰" + "─" * 68 + "╯")
 
@@ -1929,8 +2009,13 @@ class HotkeyListeningTUI:
 
                         # Show last 5 transcriptions as history (not including latest)
                         if len(entries) > 1:
-                            # Title with color (cyan/blue)
-                            print("\n\033[1;36m━━━ Transcription History (Latest 5) ━━━\033[0m")
+                            # Title with color (cyan/blue) - centered to 70 chars
+                            title = "Transcription History (Latest 5)"
+                            # Calculate dashes on each side to center (70 total width)
+                            # Title is 35 chars, so (70 - 35) / 2 = 17.5, use 17 and 18
+                            left_dashes = "━" * 17
+                            right_dashes = "━" * 18
+                            print(f"\n\033[1;36m{left_dashes} {title} {right_dashes}\033[0m")
 
                             # History entries - NO card, just text for easy copy/paste
                             history_count = min(5, len(entries) - 1)
