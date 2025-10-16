@@ -1,6 +1,6 @@
 {
-  "microphone_device": "pyaudio:14",
-  "whisper_model": "small",
+  "microphone_device": "pyaudio:16",
+  "whisper_model": "base",
   "language": "en",
   "sample_rate": 48000,
   "channels": 1,
@@ -11,17 +11,17 @@
   "notification_enabled": true,
   "sound_feedback": true,
   "sound_feedback_verbose": true,
-  "microphone_gain": 1.0,
+  "microphone_gain": 2.5,
   "auto_gain_control": true,
   "target_rms_level": 0.15,
-  "gain_boost_db": 0.0,
+  "gain_boost_db": 12.0,
   "system_mic_boost": false,
   "show_audio_levels": true,
   "level_update_interval": 0.1,
   "manual_mode_levels": "minimal",
   "noise_gate_threshold": -35.0,
-  "compressor_enabled": false,
-  "normalize_audio": false,
+  "compressor_enabled": true,
+  "normalize_audio": true,
   "advanced_silence_removal": {
     "enabled": true,
     "leading_silence_threshold_db": -40,
@@ -36,5 +36,5 @@
     "minimum_chunk_duration_ms": 200
   },
   "vosk_model_path": "models/vosk-model-small-en-us-0.15",
-  "backend": "vosk"
+  "backend": "whisper"
 }

@@ -82,12 +82,14 @@ class HyprlandIPCHandler:
 
 class WaylandHotkeyHandler:
     """Wayland-compatible hotkey handler with multiple fallback strategies."""
-    
+
     def __init__(self):
         self.callback = None
         self.running = False
         self.method = None
         self.hyprland_handler = HyprlandIPCHandler()
+        self.last_trigger_time = 0
+        self.debounce_delay = 0.5  # 500ms debounce to prevent double-triggers
         
     def setup_hotkey(self, callback: Callable[[], None]) -> bool:
         """Setup hotkey with the best available method."""
@@ -153,7 +155,13 @@ class WaylandHotkeyHandler:
                 with open(pipe_path, 'r') as pipe:
                     data = pipe.read().strip()
                     if data == 'trigger' and self.callback:
-                        self.callback()
+                        # Debouncing: only trigger if enough time has passed since last trigger
+                        current_time = time.time()
+                        if current_time - self.last_trigger_time >= self.debounce_delay:
+                            self.last_trigger_time = current_time
+                            self.callback()
+                        else:
+                            logging.debug(f"Ignored rapid hotkey press (debounced)")
             except Exception as e:
                 logging.error(f"Pipe monitoring error: {e}")
                 time.sleep(1)
@@ -193,11 +201,20 @@ class WaylandHotkeyHandler:
         print("1. Running with --manual flag")
         print("2. Sending SIGUSR1 to the process")
         print("3. Using the Hyprland keybind if configured")
-        
-        # Setup signal handler for manual triggering
+
+        # Setup signal handler for manual triggering with debouncing
         import signal
-        signal.signal(signal.SIGUSR1, lambda sig, frame: self.callback() if self.callback else None)
-        
+        def debounced_callback(sig, frame):
+            if self.callback:
+                current_time = time.time()
+                if current_time - self.last_trigger_time >= self.debounce_delay:
+                    self.last_trigger_time = current_time
+                    self.callback()
+                else:
+                    logging.debug(f"Ignored rapid signal (debounced)")
+
+        signal.signal(signal.SIGUSR1, debounced_callback)
+
         self.method = "manual"
         return True
     

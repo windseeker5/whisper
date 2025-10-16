@@ -1728,8 +1728,10 @@ class HotkeyListeningTUI:
         """Initialize with WhisperApp instance."""
         self.app = app
         self.running = True
+        self.keyboard_listener_active = True
         self.display_lock = threading.Lock()
         self.transcription_history = []
+        self.keyboard_thread = None
 
         # Hook into app's process_recording to capture transcriptions
         original_process = app.process_recording
@@ -1746,24 +1748,154 @@ class HotkeyListeningTUI:
 
         app.process_recording = process_with_display
 
+        # Start keyboard listener in background
+        self.start_keyboard_listener()
+
     def clear_screen(self):
         """Clear terminal screen."""
         os.system('clear' if os.name != 'nt' else 'cls')
+
+    def start_keyboard_listener(self):
+        """Start listening for keyboard input in a separate thread."""
+        def listen_for_keys():
+            import sys
+            import termios
+            import tty
+
+            # Save terminal settings
+            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                while self.keyboard_listener_active:
+                    # Check if input is available
+                    import select
+                    if select.select([sys.stdin], [], [], 0.1)[0]:
+                        char = sys.stdin.read(1).lower()
+                        if char == 'd' and self.keyboard_listener_active:
+                            self.delete_history()
+                        elif char == '\x03':  # Ctrl+C
+                            self.running = False
+                            break
+            finally:
+                # Restore terminal settings
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+        self.keyboard_thread = threading.Thread(target=listen_for_keys, daemon=True)
+        self.keyboard_thread.start()
+
+    def delete_history(self):
+        """Delete all recording files and log history."""
+        # Stop the keyboard listener completely
+        self.keyboard_listener_active = False
+        time.sleep(0.2)  # Give thread time to stop
+
+        self.clear_screen()
+        print("\n╭" + "─" * 68 + "╮")
+        print("│" + " " * 68 + "│")
+
+        # Line with emoji - emoji is 2 chars wide visually but len counts as 1
+        text2 = "  ⚠️  Delete All History?"
+        # Visual length: 2 spaces + 2 (emoji) + 2 spaces + 18 chars = 24
+        padding2 = 68 - 24
+        print("│" + text2 + " " * padding2 + "│")
+
+        print("│" + " " * 68 + "│")
+
+        text4 = "  This will delete:"
+        padding4 = 68 - len(text4)
+        print("│" + text4 + " " * padding4 + "│")
+
+        text5 = "    • All recording files (*.wav in rec/)"
+        padding5 = 68 - len(text5)
+        print("│" + text5 + " " * padding5 + "│")
+
+        text6 = "    • All transcription logs (log/*.txt)"
+        padding6 = 68 - len(text6)
+        print("│" + text6 + " " * padding6 + "│")
+
+        print("│" + " " * 68 + "│")
+
+        text8 = "  Press Y to delete, N to cancel"
+        padding8 = 68 - len(text8)
+        print("│" + text8 + " " * padding8 + "│")
+
+        print("│" + " " * 68 + "│")
+        print("╰" + "─" * 68 + "╯")
+        print("\n> ", end='', flush=True)
+
+        # Get single character input
+        import sys
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            tty.setcbreak(fd)
+            response = sys.stdin.read(1).lower()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        if response == 'y':
+            # Delete recording files
+            import glob
+            rec_files = glob.glob('rec/*.wav')
+            deleted_count = 0
+            for f in rec_files:
+                try:
+                    os.remove(f)
+                    deleted_count += 1
+                except Exception as e:
+                    logging.error(f"Error deleting {f}: {e}")
+
+            # Delete log files
+            log_files = glob.glob('log/transcriptions_*.txt')
+            log_deleted = 0
+            for f in log_files:
+                try:
+                    os.remove(f)
+                    log_deleted += 1
+                except Exception as e:
+                    logging.error(f"Error deleting {f}: {e}")
+
+            self.clear_screen()
+            print(f"\n✓ Deleted {deleted_count} recording files and {log_deleted} log files")
+            time.sleep(1.5)
+        else:
+            self.clear_screen()
+            print("\n✓ Cancelled - No files deleted")
+            time.sleep(1)
+
+        # Restart keyboard listener
+        self.keyboard_listener_active = True
+        self.start_keyboard_listener()
+
+        self.update_display()
 
     def update_display(self):
         """Update the TUI display."""
         with self.display_lock:
             self.clear_screen()
 
-            # Header
+            # Header with rounded box
             backend = self.app.config.get('backend', 'vosk').upper()
             status = "🔴 RECORDING" if self.app.audio_processor.is_recording else "⚫ READY"
 
-            print("=" * 70)
-            print(f"  Voice Transcriber - {backend} Backend")
-            print(f"  Status: {status}")
-            print(f"  Hotkey: SUPER+A (start/stop recording)")
-            print("=" * 70)
+            print("╭" + "─" * 68 + "╮")
+            line1 = f"Voice Transcriber - {backend} Backend"
+            print(f"│  {line1:<66}│")
+            # Status line - emoji takes 2 visual chars but len counts as 1
+            line2_text = f"Status: {status}"
+            # Calculate padding accounting for emoji width (add back 1 less space)
+            padding2 = 66 - len(line2_text) - 1
+            print(f"│  {line2_text}{' ' * padding2}│")
+            print("├" + "─" * 68 + "┤")
+            line3 = "Hotkey: SUPER+A (start/stop recording)"
+            print(f"│  {line3:<66}│")
+            line4 = "Controls: Ctrl+C (quit)  |  D (delete history)"
+            print(f"│  {line4:<66}│")
+            print("╰" + "─" * 68 + "╯")
 
             # Get recent transcriptions from log
             has_transcriptions = False
@@ -1794,46 +1926,55 @@ class HotkeyListeningTUI:
 
                     if entries:
                         has_transcriptions = True
-                        # Show latest transcription
+
+                        # Show last 5 transcriptions as history (not including latest)
+                        if len(entries) > 1:
+                            # Title with color (cyan/blue)
+                            print("\n\033[1;36m━━━ Transcription History (Latest 5) ━━━\033[0m")
+
+                            # History entries - NO card, just text for easy copy/paste
+                            history_count = min(5, len(entries) - 1)
+                            for idx, entry in enumerate(entries[-history_count-1:-1], 1):
+                                timestamp = entry['timestamp']
+                                text = entry['text']
+                                time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
+
+                                # Timestamp on its own line
+                                print(f"[{time_only}]")
+
+                                # Full text below with word wrap (no box borders)
+                                words = text.split()
+                                line = ""
+                                for word in words:
+                                    if len(line + word) > 68:
+                                        print(line)
+                                        line = word + " "
+                                    else:
+                                        line += word + " "
+                                if line.strip():
+                                    print(line.strip())
+
+                                # Empty line between entries
+                                print()
+
+                        # Show latest transcription at the bottom
                         latest = entries[-1]
                         text = latest['text']
 
-                        print("\n┌─ Latest Transcription " + "─" * 43 + "┐")
-                        # Word wrap
+                        print("\n╭─ Latest Transcription ─" + "─" * 44 + "╮")
+                        # Word wrap with proper box formatting
                         words = text.split()
                         line = ""
                         for word in words:
-                            if len(line + word) > 65:
+                            if len(line + word) > 64:
                                 print(f"│ {line:<66} │")
                                 line = word + " "
                             else:
                                 line += word + " "
                         if line.strip():
                             print(f"│ {line.strip():<66} │")
-                        print("└" + "─" * 68 + "┘")
+                        print("╰" + "─" * 68 + "╯")
                         print("✓ Copied to clipboard")
-
-                        # Show last 10 transcriptions with full text
-                        if len(entries) > 1:
-                            print("\n─── Transcription History (scroll up to see more) ───")
-                            history_count = min(10, len(entries) - 1)
-                            for i, entry in enumerate(entries[-history_count-1:-1], 1):
-                                timestamp = entry['timestamp']
-                                text = entry['text']
-                                # Show full text, wrapped for readability
-                                time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
-                                print(f"\n  #{i} [{time_only}]")
-                                # Word wrap the full text
-                                words = text.split()
-                                line_text = "  "
-                                for word in words:
-                                    if len(line_text + word) > 68:
-                                        print(line_text)
-                                        line_text = "  " + word + " "
-                                    else:
-                                        line_text += word + " "
-                                if line_text.strip():
-                                    print(line_text)
 
             except Exception as e:
                 logging.error(f"Error reading log: {e}")
@@ -1842,11 +1983,6 @@ class HotkeyListeningTUI:
 
             if not self.app.audio_processor.is_recording and not has_transcriptions:
                 print("\n[Waiting for recording... Press SUPER+A to start]")
-
-            # Footer
-            print("\n" + "─" * 70)
-            print("  Press Ctrl+C to quit  |  Scroll up to copy previous transcriptions")
-            print("=" * 70)
 
     def run(self):
         """Main display loop."""
@@ -1903,6 +2039,8 @@ class WhisperApp:
         self.hotkey_listener = None
         self.daemon_mode = False
         self.last_transcription = ""  # For TUI display
+        self.last_toggle_time = 0  # For debouncing hotkey presses
+        self.toggle_debounce_delay = 0.5  # 500ms debounce
 
         # Setup logging
         self.setup_logging()
@@ -1925,9 +2063,15 @@ class WhisperApp:
         )
     
     def signal_toggle_recording(self, signum, frame):
-        """Signal handler for toggling recording (USR1)."""
-        logging.info("Received toggle recording signal")
-        self.toggle_recording()
+        """Signal handler for toggling recording (USR1) with debouncing."""
+        import time
+        current_time = time.time()
+        if current_time - self.last_toggle_time >= self.toggle_debounce_delay:
+            self.last_toggle_time = current_time
+            logging.info("Received toggle recording signal")
+            self.toggle_recording()
+        else:
+            logging.debug(f"Ignored rapid toggle signal (debounced)")
     
     def signal_shutdown(self, signum, frame):
         """Signal handler for graceful shutdown (TERM, INT)."""
@@ -2425,21 +2569,33 @@ class WhisperApp:
         return compatible_devices
     
     def toggle_recording(self) -> None:
-        """Toggle recording state."""
+        """Toggle recording state with debouncing protection."""
+        import time
+        current_time = time.time()
+
+        # Additional debouncing check at toggle level
+        if current_time - self.last_toggle_time < self.toggle_debounce_delay:
+            logging.debug(f"Toggle ignored: too soon after last toggle")
+            return
+
+        self.last_toggle_time = current_time
+
         if not self.audio_processor.is_recording:
             # Start recording
+            logging.info("Starting recording...")
             if self.audio_processor.start_recording():
                 if self.config.get('sound_feedback'):
                     verbose = self.config.get('sound_feedback_verbose', True)
                     self.desktop.play_sound("start", verbose)
                 if self.config.get('notification_enabled'):
                     self.desktop.send_notification(
-                        "", 
-                        "🎙️", 
+                        "",
+                        "🎙️",
                         "normal"
                     )
         else:
             # Stop recording and process
+            logging.info("Stopping recording...")
             threading.Thread(target=self.process_recording, daemon=True).start()
     
     def process_recording(self) -> None:
