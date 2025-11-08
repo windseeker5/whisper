@@ -1,5 +1,5 @@
 {
-  "microphone_device": "pyaudio:12",
+  "microphone_device": "pyaudio:0",
   "whisper_model": "base",
   "language": "en",
   "sample_rate": 48000,
@@ -15,7 +15,7 @@
   "auto_gain_control": true,
   "target_rms_level": 0.15,
   "gain_boost_db": 12.0,
-  "system_mic_boost": false,
+  "system_mic_boost": true,
   "show_audio_levels": true,
   "level_update_interval": 0.1,
   "manual_mode_levels": "minimal",
