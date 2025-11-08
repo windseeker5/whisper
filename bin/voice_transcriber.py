@@ -1762,8 +1762,18 @@ class HotkeyListeningTUI:
             import termios
             import tty
 
+            # Check if stdin is a TTY
+            if not sys.stdin.isatty():
+                logging.debug("stdin is not a TTY, skipping keyboard listener")
+                return
+
             # Save terminal settings
-            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                old_settings = termios.tcgetattr(sys.stdin)
+            except termios.error:
+                logging.debug("Could not get terminal settings, skipping keyboard listener")
+                return
+
             try:
                 tty.setcbreak(sys.stdin.fileno())
                 while self.keyboard_listener_active:
@@ -1780,7 +1790,10 @@ class HotkeyListeningTUI:
                             break
             finally:
                 # Restore terminal settings
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                try:
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                except:
+                    pass
 
         self.keyboard_thread = threading.Thread(target=listen_for_keys, daemon=True)
         self.keyboard_thread.start()
