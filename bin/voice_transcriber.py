@@ -455,7 +455,18 @@ class AudioProcessor:
     def get_validated_config(self) -> Optional[Dict[str, Any]]:
         """Get the validated audio configuration."""
         return self.validated_config
-    
+
+    def reinitialize_device(self) -> bool:
+        """Reinitialize audio device after config change. Call this after changing microphone."""
+        logging.info("Reinitializing audio device from config...")
+        self._validate_audio_config()
+        if self.validated_config:
+            logging.info(f"Audio device reinitialized: device {self.validated_config['device_index']}")
+            return True
+        else:
+            logging.error("Failed to reinitialize audio device")
+            return False
+
     def get_audio_system_info(self) -> AudioSystemInfo:
         """Get detected audio system information."""
         return self.audio_system_info
@@ -1755,6 +1766,23 @@ class HotkeyListeningTUI:
         """Clear terminal screen."""
         os.system('clear' if os.name != 'nt' else 'cls')
 
+    def _get_microphone_name(self, device_str: str) -> str:
+        """Get human-readable microphone name from device string like 'pyaudio:15'."""
+        try:
+            if ':' in device_str:
+                device_index = int(device_str.split(':')[1])
+            else:
+                device_index = int(device_str)
+
+            import pyaudio
+            p = pyaudio.PyAudio()
+            info = p.get_device_info_by_index(device_index)
+            name = info.get('name', f'Device {device_index}')
+            p.terminate()
+            return f"[{device_index}] {name}"
+        except Exception:
+            return device_str
+
     def start_keyboard_listener(self):
         """Start listening for keyboard input in a separate thread."""
         def listen_for_keys():
@@ -1798,89 +1826,122 @@ class HotkeyListeningTUI:
         self.keyboard_thread = threading.Thread(target=listen_for_keys, daemon=True)
         self.keyboard_thread.start()
 
-    def open_configuration(self):
-        """Open a simplified configuration menu for TUI."""
-        # Stop the keyboard listener
-        self.keyboard_listener_active = False
-        time.sleep(0.2)
-
+    def _read_line_cbreak(self):
+        """Read a line of input while in cbreak mode (handles multi-digit numbers)."""
         import sys
-        import termios
-        import tty
+        import select
 
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-
-        try:
-            while True:
-                self.clear_screen()
-                print("\n╭" + "─" * 68 + "╮")
-                print("│" + " " * 68 + "│")
-                print("│  Configuration Menu" + " " * 47 + "│")
-                print("│" + " " * 68 + "│")
-                print("╰" + "─" * 68 + "╯")
-
-                # Get available microphones
-                import pyaudio
-                p = pyaudio.PyAudio()
-                devices = []
-                current_device = self.app.config.get('microphone_device', 'pyaudio:0')
-                current_index = int(current_device.split(':')[1]) if ':' in current_device else 0
-
-                print("\n Available Microphones:")
-                print(" " + "─" * 68)
-                for i in range(p.get_device_count()):
-                    info = p.get_device_info_by_index(i)
-                    if info['maxInputChannels'] > 0:
-                        marker = "→" if i == current_index else " "
-                        print(f" {marker} [{i}] {info['name']}")
-                        devices.append(i)
-                p.terminate()
-
-                print("\n " + "─" * 68)
-                print(f" Current backend: {self.app.config.get('backend', 'whisper').upper()}")
-                print(f" Sample rate: {self.app.config.get('sample_rate', 48000)} Hz")
-                print(f" Microphone gain: {self.app.config.get('microphone_gain', 1.0)}")
-                print(" " + "─" * 68)
-
-                print("\n Options:")
-                print("  [1-9] Select microphone by number")
-                print("  [ESC or Q] Return to TUI")
-                print("\n > ", end='', flush=True)
-
-                # Get input
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                tty.setcbreak(fd)
+        buffer = ""
+        while True:
+            # Wait for input with timeout
+            if select.select([sys.stdin], [], [], 0.1)[0]:
                 char = sys.stdin.read(1)
 
-                if char in ['\x1b', 'q', 'Q']:  # ESC or Q
-                    break
-                elif char.isdigit():
-                    device_num = int(char)
-                    if device_num in devices:
-                        # Update config
-                        self.app.config.config['microphone_device'] = f"pyaudio:{device_num}"
-                        self.app.config.save_config()
-                        print(f"\n✓ Microphone changed to device {device_num}")
-                        time.sleep(1)
+                if char == '\n' or char == '\r':  # Enter
+                    print()  # Move to next line
+                    return buffer
+                elif char == '\x7f' or char == '\x08':  # Backspace
+                    if buffer:
+                        buffer = buffer[:-1]
+                        # Erase character on screen
+                        sys.stdout.write('\b \b')
+                        sys.stdout.flush()
+                elif char == '\x1b':  # ESC - might be arrow key or ESC
+                    # Try to read more (arrow keys send escape sequences)
+                    if select.select([sys.stdin], [], [], 0.05)[0]:
+                        # It's an escape sequence (arrow key etc) - ignore it
+                        sys.stdin.read(2)  # Read and discard the rest
                     else:
-                        print(f"\n✗ Invalid device number")
-                        time.sleep(1)
+                        # Just ESC key
+                        return 'q'
+                elif char == '\x03':  # Ctrl+C
+                    return 'q'
+                elif char.isprintable():
+                    buffer += char
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
 
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    def open_configuration(self):
+        """Open a simplified configuration menu for TUI."""
+        # Temporarily pause keyboard processing (don't stop thread - we're inside it)
+        self.keyboard_listener_active = False
 
-        # Restart keyboard listener
+        import sys
+        import pyaudio
+
+        while True:
+            self.clear_screen()
+            print("\n╭" + "─" * 68 + "╮")
+            print("│" + " " * 68 + "│")
+            print("│  Configuration Menu" + " " * 47 + "│")
+            print("│" + " " * 68 + "│")
+            print("╰" + "─" * 68 + "╯")
+
+            # Get available microphones
+            p = pyaudio.PyAudio()
+            devices = []
+            current_device = self.app.config.get('microphone_device', 'pyaudio:0')
+            current_index = int(current_device.split(':')[1]) if ':' in current_device else 0
+
+            print("\n Available Microphones:")
+            print(" " + "─" * 68)
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    marker = "→" if i == current_index else " "
+                    print(f" {marker} [{i}] {info['name']}")
+                    devices.append(i)
+            p.terminate()
+
+            print("\n " + "─" * 68)
+            print(f" Current backend: {self.app.config.get('backend', 'whisper').upper()}")
+            print(f" Sample rate: {self.app.config.get('sample_rate', 48000)} Hz")
+            print(f" Microphone gain: {self.app.config.get('microphone_gain', 1.0)}")
+            print(" " + "─" * 68)
+
+            print("\n Options:")
+            print(f"  Type device number (0-{max(devices) if devices else 0}) + Enter")
+            print("  [Q + Enter or ESC] Return to TUI")
+            print("\n > ", end='', flush=True)
+
+            # Read input character by character (works in cbreak mode)
+            user_input = self._read_line_cbreak()
+
+            if user_input is None:
+                break
+
+            user_input = user_input.strip().lower()
+
+            if user_input in ['q', 'quit', 'exit', '']:
+                break
+            elif user_input.isdigit():
+                device_num = int(user_input)
+                if device_num in devices:
+                    # Update config
+                    self.app.config.config['microphone_device'] = f"pyaudio:{device_num}"
+                    self.app.config.save_config()
+                    # Reinitialize audio processor with new device
+                    if self.app.audio_processor.reinitialize_device():
+                        print(f"\n✓ Microphone changed to device {device_num}")
+                    else:
+                        print(f"\n⚠ Config saved but device init failed - restart may be needed")
+                    time.sleep(1)
+                    break  # Exit after successful selection
+                else:
+                    print(f"\n✗ Invalid device number. Available: {devices}")
+                    time.sleep(2)
+            else:
+                print(f"\n✗ Please enter a valid number")
+                time.sleep(1)
+
+        # Re-enable keyboard processing (don't start new thread - old one resumes)
         self.keyboard_listener_active = True
-        self.start_keyboard_listener()
-
         self.update_display()
 
     def delete_history(self):
         """Delete all recording files and log history."""
-        # Stop the keyboard listener completely
+        # Temporarily pause keyboard processing (don't stop thread - we're inside it)
         self.keyboard_listener_active = False
-        time.sleep(0.2)  # Give thread time to stop
 
         self.clear_screen()
         print("\n╭" + "─" * 68 + "╮")
@@ -1960,10 +2021,8 @@ class HotkeyListeningTUI:
             print("\n✓ Cancelled - No files deleted")
             time.sleep(1)
 
-        # Restart keyboard listener
+        # Re-enable keyboard processing (don't start new thread - old one resumes)
         self.keyboard_listener_active = True
-        self.start_keyboard_listener()
-
         self.update_display()
 
     def update_display(self):
@@ -1988,6 +2047,14 @@ class HotkeyListeningTUI:
             print(f"│  {line3:<66}│")
             line4 = "Controls: Ctrl+C (quit)  |  C (config)  |  D (delete)"
             print(f"│  {line4:<66}│")
+            print("├" + "─" * 68 + "┤")
+            # Show current microphone
+            mic_device = self.app.config.get('microphone_device', 'pyaudio:0')
+            mic_name = self._get_microphone_name(mic_device)
+            line5 = f"Mic: {mic_name}"
+            if len(line5) > 66:
+                line5 = line5[:63] + "..."
+            print(f"│  {line5:<66}│")
             print("╰" + "─" * 68 + "╯")
 
             # Get recent transcriptions from log

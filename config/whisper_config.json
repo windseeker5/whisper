@@ -1,8 +1,8 @@
 {
-  "microphone_device": "pyaudio:0",
+  "microphone_device": "pyaudio:15",
   "whisper_model": "base",
   "language": "en",
-  "sample_rate": 44100,
+  "sample_rate": 48000,
   "channels": 1,
   "chunk_size": 1102,
   "vad_threshold": 0.01,
