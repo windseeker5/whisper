@@ -317,12 +317,29 @@ class AudioProcessor:
         device_id = self.config.get('microphone_device')
         sample_rate = self.config.get('sample_rate', 16000)
         channels = self.config.get('channels', 1)
-        
+
         logging.info("Validating audio configuration...")
-        
+
         # Get device index for testing
         device_index = self._get_pyaudio_device_index(device_id)
-        
+
+        # Check if device fell back to default (configured device no longer exists)
+        device_changed = False
+        if device_id is not None and device_index is None:
+            # Device was configured but doesn't exist anymore - find the default device
+            logging.warning(f"Configured device '{device_id}' no longer exists, auto-switching to default")
+            # Find the 'default' device index
+            for i in range(self.audio.get_device_count()):
+                try:
+                    info = self.audio.get_device_info_by_index(i)
+                    if 'default' in info.get('name', '').lower() and info.get('maxInputChannels', 0) > 0:
+                        device_index = i
+                        device_changed = True
+                        logging.info(f"Found default device at index {i}: {info['name']}")
+                        break
+                except Exception:
+                    continue
+
         # Test current configuration with error suppression
         if self._test_audio_config(device_index, sample_rate, channels):
             logging.info("✓ Current audio configuration is valid")
@@ -331,20 +348,27 @@ class AudioProcessor:
                 'sample_rate': sample_rate,
                 'channels': channels
             }
+            # Save the new device if it changed
+            if device_changed and device_index is not None:
+                self.config.set('microphone_device', f'pyaudio:{device_index}')
+                self.config.save_config()
+                logging.info(f"✓ Auto-saved new device: pyaudio:{device_index}")
             return
-        
+
         logging.warning("✗ Current audio configuration is not compatible")
-        
+
         # Try to find a working configuration
         working_config = self._find_working_config(device_index)
-        
+
         if working_config:
             self.validated_config = working_config
             # Update the main config with working values
             self.config.set('sample_rate', working_config['sample_rate'])
             self.config.set('channels', working_config['channels'])
+            if device_changed and working_config.get('device_index') is not None:
+                self.config.set('microphone_device', f"pyaudio:{working_config['device_index']}")
             self.config.save_config()
-            
+
             logging.info(f"✓ Auto-configured compatible settings:")
             logging.info(f"  Sample Rate: {working_config['sample_rate']} Hz")
             logging.info(f"  Channels: {working_config['channels']}")
@@ -524,15 +548,34 @@ class AudioProcessor:
         """Convert device_id to PyAudio device index."""
         if device_id is None:
             return None
-        
+
+        device_count = self.audio.get_device_count()
+
+        # Helper to validate device index exists and has input channels
+        def _validate_device_index(index: int) -> bool:
+            if index < 0 or index >= device_count:
+                return False
+            try:
+                info = self.audio.get_device_info_by_index(index)
+                return info.get('maxInputChannels', 0) > 0
+            except Exception:
+                return False
+
         # If it's already a PyAudio index
         if isinstance(device_id, int):
-            return device_id
-        
+            if _validate_device_index(device_id):
+                return device_id
+            logging.warning(f"Device index {device_id} no longer exists (max: {device_count-1}), falling back to default")
+            return None
+
         # If it's a PyAudio device string
         if isinstance(device_id, str) and device_id.startswith('pyaudio:'):
             try:
-                return int(device_id.split(':')[1])
+                index = int(device_id.split(':')[1])
+                if _validate_device_index(index):
+                    return index
+                logging.warning(f"Device pyaudio:{index} no longer exists (max: {device_count-1}), falling back to default")
+                return None
             except (ValueError, IndexError):
                 logging.warning(f"Invalid PyAudio device ID: {device_id}")
                 return None
