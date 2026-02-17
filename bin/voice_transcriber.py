@@ -2351,7 +2351,7 @@ class HotkeyListeningTUI:
 
             # Header with rounded box
             backend = self.app.config.get('backend', 'vosk').upper()
-            status = "🔴 RECORDING" if self.app.audio_processor.is_recording else "⚫ READY"
+            status = "🔴 RECORDING" if self.app.audio_processor.is_recording else "🟢 READY"
 
             print("╭" + "─" * 68 + "╮")
             line1 = f"Voice Transcriber - {backend} Backend"

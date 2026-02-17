@@ -1,6 +1,6 @@
 {
   "microphone_device": "pyaudio:5",
-  "whisper_model": "base",
+  "whisper_model": "tiny",
   "language": "en",
   "sample_rate": 16000,
   "channels": 1,
@@ -36,5 +36,5 @@
     "minimum_chunk_duration_ms": 200
   },
   "vosk_model_path": "models/vosk-model-small-en-us-0.15",
-  "backend": "vosk"
+  "backend": "whisper"
 }
