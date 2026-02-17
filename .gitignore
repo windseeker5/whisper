@@ -1,3 +1,7 @@
 /rec
 /log
 /config
+#/bin
+models/
+__pycache__/
+*.pyc

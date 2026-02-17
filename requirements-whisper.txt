@@ -1,0 +1,4 @@
+# Whisper backend - High accuracy, resource intensive (requires 6GB+ RAM)
+# WARNING: Downloads torch (~888 MB)
+openai-whisper>=20231117
+librosa>=0.10.0

@@ -1856,6 +1856,8 @@ class HotkeyListeningTUI:
                             self.delete_history()
                         elif char == 'c' and self.keyboard_listener_active:
                             self.open_configuration()
+                        elif char == 'm' and self.keyboard_listener_active:
+                            self.scan_microphones()
                         elif char == '\x03':  # Ctrl+C
                             self.running = False
                             break
@@ -1981,6 +1983,280 @@ class HotkeyListeningTUI:
         self.keyboard_listener_active = True
         self.update_display()
 
+    @staticmethod
+    def _test_mic_worker(dev_index, dev_channels, sample_rate, record_seconds, wav_path):
+        """Run in a child process to test a mic device. If ALSA segfaults, only this process dies."""
+        import pyaudio
+        import struct
+        import math
+        import wave
+
+        p = pyaudio.PyAudio()
+        try:
+            channels = min(dev_channels, 2)
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=sample_rate,
+                input=True,
+                input_device_index=dev_index,
+                frames_per_buffer=1024
+            )
+
+            frames = []
+            chunks_per_second = sample_rate // 1024
+            total_chunks = chunks_per_second * record_seconds
+            max_rms = 0.0
+
+            for chunk_i in range(total_chunks):
+                data = stream.read(1024, exception_on_overflow=False)
+                frames.append(data)
+
+                all_samples = struct.unpack(f'<{len(data)//2}h', data)
+                ch1_samples = all_samples[::channels] if channels > 1 else all_samples
+                if ch1_samples:
+                    rms = math.sqrt(sum(s * s for s in ch1_samples) / len(ch1_samples))
+                    rms_norm = min(rms / 32768.0 * 10, 1.0)
+                    if rms_norm > max_rms:
+                        max_rms = rms_norm
+
+                # Print level updates for parent to read
+                if chunk_i % max(1, chunks_per_second // 4) == 0:
+                    seconds_left = record_seconds - (chunk_i / chunks_per_second)
+                    print(f"LEVEL:{rms_norm:.4f}:{seconds_left:.1f}", flush=True)
+
+            stream.stop_stream()
+            stream.close()
+
+            if max_rms < 0.001:
+                print("RESULT:SILENT", flush=True)
+            else:
+                # Save mono WAV
+                if channels > 1:
+                    mono_frames = []
+                    for frame_data in frames:
+                        all_samples = struct.unpack(f'<{len(frame_data)//2}h', frame_data)
+                        ch1 = all_samples[::channels]
+                        mono_frames.append(struct.pack(f'<{len(ch1)}h', *ch1))
+                    wav_data = b''.join(mono_frames)
+                else:
+                    wav_data = b''.join(frames)
+
+                wf = wave.open(wav_path, 'wb')
+                wf.setnchannels(1)
+                wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+                wf.setframerate(sample_rate)
+                wf.writeframes(wav_data)
+                wf.close()
+                print(f"RESULT:OK:{max_rms:.4f}", flush=True)
+
+        except Exception as e:
+            print(f"RESULT:ERROR:{e}", flush=True)
+        finally:
+            p.terminate()
+
+    def scan_microphones(self):
+        """Scan all microphones: record a short clip from each and play back.
+
+        Uses PyAudio for enumeration (full device list) but tests each device
+        in a child process so ALSA/JACK segfaults don't crash the main app.
+        """
+        self.keyboard_listener_active = False
+
+        import pyaudio
+        import multiprocessing
+
+        self.clear_screen()
+        print("\n╭" + "─" * 68 + "╮")
+        print("│" + " " * 68 + "│")
+        text = "  Microphone Scanner / Tester"
+        print("│" + text + " " * (68 - len(text)) + "│")
+        print("│" + " " * 68 + "│")
+        print("╰" + "─" * 68 + "╯")
+
+        print("\n Scanning for input devices...\n")
+
+        p = pyaudio.PyAudio()
+        devices = []
+        current_device = self.app.config.get('microphone_device', 'pyaudio:0')
+        current_index = int(current_device.split(':')[1]) if ':' in current_device else 0
+
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if info['maxInputChannels'] > 0:
+                # Skip virtual devices with absurd channel counts
+                if info['maxInputChannels'] > 8:
+                    continue
+                marker = " *" if i == current_index else ""
+                devices.append((i, info['name'], info['maxInputChannels'],
+                                int(info['defaultSampleRate'])))
+                print(f"  [{i}] {info['name']}  "
+                      f"(ch: {info['maxInputChannels']}, "
+                      f"rate: {int(info['defaultSampleRate'])} Hz){marker}")
+        p.terminate()
+
+        if not devices:
+            print("\n  No input devices found!")
+            print("\n  Press any key to return...")
+            self._read_line_cbreak()
+            self.keyboard_listener_active = True
+            self.update_display()
+            return
+
+        print(f"\n Found {len(devices)} device(s). Testing each one...\n")
+        print(" " + "─" * 68)
+
+        record_seconds = 3
+        working_devices = []
+
+        for dev_index, dev_name, dev_channels, dev_rate in devices:
+            sample_rate = dev_rate
+            if sample_rate > 48000:
+                sample_rate = 48000
+            elif sample_rate < 8000:
+                sample_rate = 16000
+            wav_path = f"/tmp/mic_test_{dev_index}.wav"
+
+            print(f"\n  Testing [{dev_index}] {dev_name}")
+            print(f"  Recording {record_seconds}s... Speak now!", flush=True)
+
+            # Run recording in isolated child process
+            proc = subprocess.Popen(
+                [sys.executable, '-c',
+                 f"from bin.voice_transcriber import HotkeyListeningTUI; "
+                 f"HotkeyListeningTUI._test_mic_worker("
+                 f"{dev_index}, {dev_channels}, {sample_rate}, "
+                 f"{record_seconds}, '{wav_path}')"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+
+            # Read child output for live level updates
+            result_line = None
+            try:
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if line.startswith('LEVEL:'):
+                        parts = line.split(':')
+                        rms_norm = float(parts[1])
+                        secs_left = parts[2]
+                        bar_width = 30
+                        filled = int(rms_norm * bar_width)
+                        bar = '█' * filled + ' ' * (bar_width - filled)
+                        sys.stdout.write(f"\r  Level: [{bar}] {secs_left}s ")
+                        sys.stdout.flush()
+                    elif line.startswith('RESULT:'):
+                        result_line = line
+
+                proc.wait(timeout=record_seconds + 10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+            exit_code = proc.returncode
+
+            print(f"\r  Level: [{'done':^30}]       ")
+
+            if exit_code != 0 and exit_code is not None:
+                if exit_code < 0:
+                    print(f"  SKIP - Device crashed (signal {-exit_code})")
+                else:
+                    print(f"  SKIP - Device test failed (exit {exit_code})")
+                continue
+
+            if result_line is None:
+                print("  SKIP - No response from test")
+                continue
+
+            if result_line == 'RESULT:SILENT':
+                print("  Result: No audio detected (dead/muted mic)")
+                continue
+            elif result_line.startswith('RESULT:ERROR:'):
+                print(f"  SKIP - {result_line.split(':', 2)[2]}")
+                continue
+            elif result_line.startswith('RESULT:OK:'):
+                max_rms = float(result_line.split(':')[2])
+                print(f"  Peak level: {max_rms * 100:.1f}%")
+
+                # Play back the recording
+                if os.path.exists(wav_path):
+                    print("  Playing back...", end='', flush=True)
+                    played = False
+                    for player_cmd in [['paplay', wav_path],
+                                       ['ffplay', '-nodisp', '-autoexit', wav_path],
+                                       ['aplay', wav_path]]:
+                        try:
+                            play_proc = subprocess.Popen(
+                                player_cmd,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            play_proc.wait(timeout=record_seconds + 5)
+                            played = True
+                            break
+                        except (subprocess.SubprocessError, FileNotFoundError):
+                            continue
+                        except subprocess.TimeoutExpired:
+                            play_proc.kill()
+                            played = True
+                            break
+
+                    if played:
+                        print(" done")
+                    else:
+                        print(" (no audio player found)")
+
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass
+
+                working_devices.append((dev_index, dev_name, max_rms))
+
+        print("\n " + "─" * 68)
+
+        if not working_devices:
+            print("\n  No working microphones detected!")
+            print("\n  Press any key to return...")
+            self._read_line_cbreak()
+            self.keyboard_listener_active = True
+            self.update_display()
+            return
+
+        # Show summary
+        print("\n  Working microphones:")
+        for dev_index, dev_name, peak in working_devices:
+            bar_width = 15
+            filled = int(peak * bar_width)
+            bar = '█' * filled + ' ' * (bar_width - filled)
+            print(f"    [{dev_index}] {dev_name}  [{bar}] {peak*100:.0f}%")
+
+        print(f"\n  Current device: [{current_index}]")
+        print(f"  Enter device number to select, or Q to cancel")
+        print("\n > ", end='', flush=True)
+
+        user_input = self._read_line_cbreak()
+
+        if user_input and user_input.strip().isdigit():
+            device_num = int(user_input.strip())
+            valid_indices = [d[0] for d in working_devices]
+            if device_num in valid_indices:
+                self.app.config.config['microphone_device'] = f"pyaudio:{device_num}"
+                self.app.config.save_config()
+                if self.app.audio_processor.reinitialize_device():
+                    print(f"\n  Microphone changed to device [{device_num}]")
+                else:
+                    print(f"\n  Config saved but device init failed - restart may be needed")
+                time.sleep(1.5)
+            else:
+                print(f"\n  Invalid selection. Working devices: {valid_indices}")
+                time.sleep(2)
+
+        self.keyboard_listener_active = True
+        self.update_display()
+
     def delete_history(self):
         """Delete all recording files and log history."""
         # Temporarily pause keyboard processing (don't stop thread - we're inside it)
@@ -2088,7 +2364,7 @@ class HotkeyListeningTUI:
             print("├" + "─" * 68 + "┤")
             line3 = "Hotkey: SUPER+A (start/stop recording)"
             print(f"│  {line3:<66}│")
-            line4 = "Controls: Ctrl+C (quit)  |  C (config)  |  D (delete)"
+            line4 = "Controls: Ctrl+C (quit) | C (config) | D (delete) | M (mic test)"
             print(f"│  {line4:<66}│")
             print("├" + "─" * 68 + "┤")
             # Show current microphone
@@ -2777,17 +3053,7 @@ class WhisperApp:
         return compatible_devices
     
     def toggle_recording(self) -> None:
-        """Toggle recording state with debouncing protection."""
-        import time
-        current_time = time.time()
-
-        # Additional debouncing check at toggle level
-        if current_time - self.last_toggle_time < self.toggle_debounce_delay:
-            logging.debug(f"Toggle ignored: too soon after last toggle")
-            return
-
-        self.last_toggle_time = current_time
-
+        """Toggle recording state."""
         if not self.audio_processor.is_recording:
             # Start recording
             logging.info("Starting recording...")
@@ -3336,8 +3602,10 @@ class WhisperApp:
         # Mark app as running
         self.is_running = True
 
-        # Setup hotkey handler (using signals for Wayland/Sway)
-        self.setup_hotkey()
+        # On Wayland/Hyprland, SIGUSR1 is sent by the keybind configured in
+        # ~/.config/hypr/bindings.conf. The signal handler is already registered
+        # in __init__, so we don't call setup_hotkey() which would override it.
+        # setup_hotkey() is only needed for non-Wayland or daemon mode.
 
         # Start TUI display in main thread
         try:
