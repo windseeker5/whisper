@@ -2419,7 +2419,7 @@ class HotkeyListeningTUI:
             line3 = "Hotkey: SUPER+A  start / stop recording"
             print(f"│  {line3:<66}│")
             line4 = "C config  |  D delete  |  M mic  |  \uf001 1-5 play audio"
-            print(f"│  {line4:<65}│")
+            print(f"│  {line4:<66}│")
             print("├" + "─" * 68 + "┤")
             # Show current microphone
             mic_device = self.app.config.get('microphone_device', 'pyaudio:0')
