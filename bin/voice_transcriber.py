@@ -2398,37 +2398,36 @@ class HotkeyListeningTUI:
             self.clear_screen()
 
             # Header with rounded box
+            # Icons are kept outside box-alignment-sensitive lines to avoid
+            # terminal font width ambiguity. Status uses colored circle only.
             backend = self.app.config.get('backend', 'vosk').upper()
             if self.app.audio_processor.is_recording:
-                status = "\033[1;31m\uf111\033[0m REC"
-                status_visual_len = len(" REC") + 2  # icon(1) + space + "REC" + color codes ignored
+                status_icon = "\033[1;31m\uf111\033[0m"
+                status_label = " REC"
             else:
-                status = "\033[1;32m\uf111\033[0m READY"
-                status_visual_len = len(" READY") + 2
+                status_icon = "\033[1;32m\uf111\033[0m"
+                status_label = " READY"
 
-            # Each Nerd Font icon renders 2 visual cols but counts as 1 char in len().
-            # So for N icons on a line, use :<(66 - N)> to keep the right border aligned.
             print("╭" + "─" * 68 + "╮")
-            line1 = f"\ue795  Voice Transcriber - {backend} Backend"
-            print(f"│  {line1:<65}│")
-            # Status line: \uf111 is double-wide + ANSI codes are zero-width
-            line2_text = f"Status: {status}"
-            padding2 = 65 - len("Status: ") - status_visual_len
-            print(f"│  {line2_text}{' ' * padding2}│")
+            line1 = f"Voice Transcriber  {backend} Backend"
+            print(f"│  {line1:<66}│")
+            # Status: icon + label. ANSI codes are zero-width; icon is 1 visual col.
+            # Pad: 66 - len("Status: ") - 1(icon) - len(label)
+            status_pad = 66 - len("Status: ") - 1 - len(status_label)
+            print(f"│  Status: {status_icon}{status_label}{' ' * status_pad}│")
             print("├" + "─" * 68 + "┤")
-            line3 = "\uf11c  Hotkey: SUPER+A (start/stop recording)"
-            print(f"│  {line3:<65}│")
-            # line4 has 4 icons → subtract 4
-            line4 = "\uf013  C (config) | \uf1f8  D (delete) | \uf130  M (mic) | \uf001  1-5 (play)"
-            print(f"│  {line4:<62}│")
+            line3 = "Hotkey: SUPER+A  start / stop recording"
+            print(f"│  {line3:<66}│")
+            line4 = "C config  |  D delete  |  M mic  |  \uf001 1-5 play audio"
+            print(f"│  {line4:<65}│")
             print("├" + "─" * 68 + "┤")
-            # Show current microphone — 1 icon → subtract 1
+            # Show current microphone
             mic_device = self.app.config.get('microphone_device', 'pyaudio:0')
             mic_name = self._get_microphone_name(mic_device)
-            line5 = f"\uf130  {mic_name}"
-            if len(line5) > 65:
-                line5 = line5[:62] + "..."
-            print(f"│  {line5:<65}│")
+            line5 = f"\uf130 {mic_name}"
+            if len(line5) > 66:
+                line5 = line5[:63] + "..."
+            print(f"│  {line5:<66}│")
             print("╰" + "─" * 68 + "╯")
 
             # Get recent transcriptions from log
