@@ -1860,6 +1860,8 @@ class HotkeyListeningTUI:
                             self.open_configuration()
                         elif char == 'm' and self.keyboard_listener_active:
                             self.scan_microphones()
+                        elif char == 'o' and self.keyboard_listener_active:
+                            self.cycle_model()
                         elif char in '12345' and self.keyboard_listener_active:
                             self.play_audio(int(char))
                         elif char == '\x03':  # Ctrl+C
@@ -2059,27 +2061,41 @@ class HotkeyListeningTUI:
         finally:
             p.terminate()
 
-    def scan_microphones(self):
-        """Scan all microphones: record a short clip from each and play back.
+    def cycle_model(self):
+        """Cycle to the next Whisper model (tiny→base→small→medium→large→tiny)."""
+        backend = self.app.config.get('backend', 'whisper')
+        if backend != 'whisper':
+            return
 
-        Uses PyAudio for enumeration (full device list) but tests each device
-        in a child process so ALSA/JACK segfaults don't crash the main app.
+        models = ['tiny', 'base', 'small', 'medium', 'large']
+        current = self.app.config.get('whisper_model', 'tiny')
+        current_idx = models.index(current) if current in models else 0
+        next_model = models[(current_idx + 1) % len(models)]
+
+        self.app.config.set('whisper_model', next_model)
+
+        # Update model_name on the backend so load_model() picks up the new value
+        if hasattr(self.app.transcriber, 'model_name'):
+            self.app.transcriber.model_name = next_model
+
+        self.update_display()
+        sys.stdout.write(f"\n  Loading model '{next_model}', please wait...")
+        sys.stdout.flush()
+
+        self.app.transcriber.load_model()
+        self.update_display()
+
+    def scan_microphones(self):
+        """List microphones, let user pick one to test, show levels + playback.
+
+        Shows device list first, tests only the device the user selects.
+        After each test offers: use device / test another / return to TUI.
         """
         self.keyboard_listener_active = False
 
         import pyaudio
-        import multiprocessing
 
-        self.clear_screen()
-        print("\n╭" + "─" * 68 + "╮")
-        print("│" + " " * 68 + "│")
-        text = "  Microphone Scanner / Tester"
-        print("│" + text + " " * (68 - len(text)) + "│")
-        print("│" + " " * 68 + "│")
-        print("╰" + "─" * 68 + "╯")
-
-        print("\n Scanning for input devices...\n")
-
+        # Enumerate input devices once
         p = pyaudio.PyAudio()
         devices = []
         current_device = self.app.config.get('microphone_device', 'pyaudio:0')
@@ -2087,55 +2103,86 @@ class HotkeyListeningTUI:
 
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0:
-                # Skip virtual devices with absurd channel counts
-                if info['maxInputChannels'] > 8:
-                    continue
-                marker = " *" if i == current_index else ""
+            if info['maxInputChannels'] > 0 and info['maxInputChannels'] <= 8:
                 devices.append((i, info['name'], info['maxInputChannels'],
                                 int(info['defaultSampleRate'])))
-                print(f"  [{i}] {info['name']}  "
-                      f"(ch: {info['maxInputChannels']}, "
-                      f"rate: {int(info['defaultSampleRate'])} Hz){marker}")
         p.terminate()
 
         if not devices:
+            self.clear_screen()
             print("\n  No input devices found!")
-            print("\n  Press any key to return...")
+            print("  Press any key to return...")
             self._read_line_cbreak()
             self.keyboard_listener_active = True
             self.update_display()
             return
 
-        print(f"\n Found {len(devices)} device(s). Testing each one...\n")
-        print(" " + "─" * 68)
-
         record_seconds = 3
-        working_devices = []
+        pending_device_num = None  # when set, skip list and go straight to testing
 
-        for dev_index, dev_name, dev_channels, dev_rate in devices:
-            sample_rate = dev_rate
-            if sample_rate > 48000:
-                sample_rate = 48000
-            elif sample_rate < 8000:
-                sample_rate = 16000
+        while True:
+            if pending_device_num is None:
+                # ── Device list ──────────────────────────────────────────────
+                self.clear_screen()
+                print("\n╭" + "─" * 68 + "╮")
+                text = "  Microphone Tester"
+                print("│" + text + " " * (68 - len(text)) + "│")
+                print("╰" + "─" * 68 + "╯")
+                print()
+                print("  Available input devices:")
+                print("  " + "─" * 66)
+                for dev_index, dev_name, dev_channels, dev_rate in devices:
+                    marker = "  ← active" if dev_index == current_index else ""
+                    print(f"  [{dev_index}] {dev_name}  "
+                          f"(ch:{dev_channels}, {dev_rate}Hz){marker}")
+                print("  " + "─" * 66)
+                print()
+                print("  Enter device number to test, or [Q] to return")
+                print("\n  > ", end='', flush=True)
+
+                user_input = self._read_line_cbreak()
+                if user_input is None or user_input.strip().lower() in ['q', 'quit', '']:
+                    break
+                if not user_input.strip().isdigit():
+                    continue
+                device_num = int(user_input.strip())
+            else:
+                device_num = pending_device_num
+                pending_device_num = None
+
+            # ── Find device info ──────────────────────────────────────────────
+            dev_info = next((d for d in devices if d[0] == device_num), None)
+            if dev_info is None:
+                print(f"\n  Device {device_num} not found.")
+                time.sleep(1)
+                continue
+
+            dev_index, dev_name, dev_channels, dev_rate = dev_info
+            sample_rate = min(max(dev_rate, 8000), 48000)
             wav_path = f"/tmp/mic_test_{dev_index}.wav"
 
-            print(f"\n  Testing [{dev_index}] {dev_name}")
-            print(f"  Recording {record_seconds}s... Speak now!", flush=True)
+            # ── Test selected device ──────────────────────────────────────────
+            self.clear_screen()
+            print("\n╭" + "─" * 68 + "╮")
+            text = f"  Testing: [{dev_index}] {dev_name}"
+            if len(text) > 68:
+                text = text[:65] + "..."
+            print("│" + text + " " * (68 - len(text)) + "│")
+            print("╰" + "─" * 68 + "╯")
+            print(f"\n  Recording {record_seconds}s... Speak now!\n")
 
-            # Run recording in isolated child process
+            _bin_dir = os.path.dirname(os.path.abspath(__file__))
             proc = subprocess.Popen(
                 [sys.executable, '-c',
-                 f"from bin.voice_transcriber import HotkeyListeningTUI; "
+                 f"import sys; sys.path.insert(0, {repr(_bin_dir)}); "
+                 f"from voice_transcriber import HotkeyListeningTUI; "
                  f"HotkeyListeningTUI._test_mic_worker("
                  f"{dev_index}, {dev_channels}, {sample_rate}, "
-                 f"{record_seconds}, '{wav_path}')"],
+                 f"{record_seconds}, {repr(wav_path)})"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                stdin=subprocess.DEVNULL, text=True
             )
 
-            # Read child output for live level updates
             result_line = None
             try:
                 while True:
@@ -2154,37 +2201,31 @@ class HotkeyListeningTUI:
                         sys.stdout.flush()
                     elif line.startswith('RESULT:'):
                         result_line = line
-
                 proc.wait(timeout=record_seconds + 10)
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+            print(f"\r  Level: [{'done':^30}]       ")
             exit_code = proc.returncode
 
-            print(f"\r  Level: [{'done':^30}]       ")
-
+            # ── Show test result ──────────────────────────────────────────────
             if exit_code != 0 and exit_code is not None:
-                if exit_code < 0:
-                    print(f"  SKIP - Device crashed (signal {-exit_code})")
-                else:
-                    print(f"  SKIP - Device test failed (exit {exit_code})")
-                continue
-
-            if result_line is None:
-                print("  SKIP - No response from test")
-                continue
-
-            if result_line == 'RESULT:SILENT':
-                print("  Result: No audio detected (dead/muted mic)")
-                continue
+                msg = (f"Device crashed (signal {-exit_code})" if exit_code < 0
+                       else f"Device test failed (exit {exit_code})")
+                print(f"\n  {msg}")
+            elif result_line is None:
+                print("\n  No response from test process")
+            elif result_line == 'RESULT:SILENT':
+                print("\n  No audio detected (mic may be muted or wrong device)")
             elif result_line.startswith('RESULT:ERROR:'):
-                print(f"  SKIP - {result_line.split(':', 2)[2]}")
-                continue
+                print(f"\n  Error: {result_line.split(':', 2)[2]}")
             elif result_line.startswith('RESULT:OK:'):
                 max_rms = float(result_line.split(':')[2])
-                print(f"  Peak level: {max_rms * 100:.1f}%")
+                bar_width = 20
+                filled = int(max_rms * bar_width)
+                bar = '█' * filled + ' ' * (bar_width - filled)
+                print(f"\n  Peak level: [{bar}] {max_rms * 100:.0f}%")
 
-                # Play back the recording
                 if os.path.exists(wav_path):
                     print("  Playing back...", end='', flush=True)
                     played = False
@@ -2206,57 +2247,39 @@ class HotkeyListeningTUI:
                             play_proc.kill()
                             played = True
                             break
-
-                    if played:
-                        print(" done")
-                    else:
-                        print(" (no audio player found)")
-
+                    print(" done" if played else " (no audio player found)")
                     try:
                         os.remove(wav_path)
                     except OSError:
                         pass
 
-                working_devices.append((dev_index, dev_name, max_rms))
+            # ── Post-test options ─────────────────────────────────────────────
+            print()
+            print(f"  [Y] Use device [{dev_index}] as active microphone")
+            print(f"  [number] Test a different device")
+            print(f"  [Q] Return to TUI")
+            print("\n  > ", end='', flush=True)
 
-        print("\n " + "─" * 68)
+            action = self._read_line_cbreak()
+            if action is None:
+                break
+            action = action.strip().lower()
 
-        if not working_devices:
-            print("\n  No working microphones detected!")
-            print("\n  Press any key to return...")
-            self._read_line_cbreak()
-            self.keyboard_listener_active = True
-            self.update_display()
-            return
-
-        # Show summary
-        print("\n  Working microphones:")
-        for dev_index, dev_name, peak in working_devices:
-            bar_width = 15
-            filled = int(peak * bar_width)
-            bar = '█' * filled + ' ' * (bar_width - filled)
-            print(f"    [{dev_index}] {dev_name}  [{bar}] {peak*100:.0f}%")
-
-        print(f"\n  Current device: [{current_index}]")
-        print(f"  Enter device number to select, or Q to cancel")
-        print("\n > ", end='', flush=True)
-
-        user_input = self._read_line_cbreak()
-
-        if user_input and user_input.strip().isdigit():
-            device_num = int(user_input.strip())
-            valid_indices = [d[0] for d in working_devices]
-            if device_num in valid_indices:
-                self.app.config.config['microphone_device'] = f"pyaudio:{device_num}"
+            if action == 'y':
+                self.app.config.config['microphone_device'] = f"pyaudio:{dev_index}"
                 self.app.config.save_config()
+                current_index = dev_index
                 if self.app.audio_processor.reinitialize_device():
-                    print(f"\n  Microphone changed to device [{device_num}]")
+                    print(f"\n  Microphone set to device [{dev_index}]")
                 else:
-                    print(f"\n  Config saved but device init failed - restart may be needed")
+                    print(f"\n  Config saved but device init failed — restart may be needed")
                 time.sleep(1.5)
-            else:
-                print(f"\n  Invalid selection. Working devices: {valid_indices}")
-                time.sleep(2)
+                break
+            elif action.isdigit():
+                pending_device_num = int(action)
+            elif action in ['q', 'quit', '']:
+                break
+            # else: loop back to device list
 
         self.keyboard_listener_active = True
         self.update_display()
@@ -2409,7 +2432,11 @@ class HotkeyListeningTUI:
                 status_label = " READY"
 
             print("╭" + "─" * 68 + "╮")
-            line1 = f"Voice Transcriber  {backend} Backend"
+            if backend == 'WHISPER':
+                model = self.app.config.get('whisper_model', 'tiny')
+                line1 = f"Voice Transcriber  {backend} [{model}] Backend"
+            else:
+                line1 = f"Voice Transcriber  {backend} Backend"
             print(f"│  {line1:<66}│")
             # Status: icon + label. ANSI codes are zero-width; icon is 1 visual col.
             # Pad: 66 - len("Status: ") - 1(icon) - len(label)
@@ -2418,7 +2445,10 @@ class HotkeyListeningTUI:
             print("├" + "─" * 68 + "┤")
             line3 = "Hotkey: SUPER+A  start / stop recording"
             print(f"│  {line3:<66}│")
-            line4 = "C config  |  D delete  |  M mic  |  \uf001 1-5 play audio"
+            if backend == 'WHISPER':
+                line4 = "C config  |  D delete  |  M mic  |  O model  |  \uf001 1-5 play audio"
+            else:
+                line4 = "C config  |  D delete  |  M mic  |  \uf001 1-5 play audio"
             print(f"│  {line4:<66}│")
             print("├" + "─" * 68 + "┤")
             # Show current microphone
