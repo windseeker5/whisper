@@ -1786,6 +1786,8 @@ class HotkeyListeningTUI:
         self.display_lock = threading.Lock()
         self.transcription_history = []
         self.keyboard_thread = None
+        self.history_entries = []  # [{timestamp, text, audio_file}, ...] for playback
+        self.current_player = None  # Currently playing audio process
 
         # Hook into app's process_recording to capture transcriptions
         original_process = app.process_recording
@@ -1858,6 +1860,8 @@ class HotkeyListeningTUI:
                             self.open_configuration()
                         elif char == 'm' and self.keyboard_listener_active:
                             self.scan_microphones()
+                        elif char in '12345' and self.keyboard_listener_active:
+                            self.play_audio(int(char))
                         elif char == '\x03':  # Ctrl+C
                             self.running = False
                             break
@@ -2344,6 +2348,50 @@ class HotkeyListeningTUI:
         self.keyboard_listener_active = True
         self.update_display()
 
+    def play_audio(self, index: int):
+        """Play back the audio file for a history entry (1-based index)."""
+        idx = index - 1
+        if idx < 0 or idx >= len(self.history_entries):
+            return
+
+        entry = self.history_entries[idx]
+        audio_file = entry.get('audio_file', '')
+        if not audio_file:
+            return
+
+        # Build full path - audio_file may be just a basename
+        rec_dir = Path(__file__).parent.parent / 'rec'
+        if not Path(audio_file).is_absolute():
+            audio_path = rec_dir / audio_file
+        else:
+            audio_path = Path(audio_file)
+
+        if not audio_path.exists():
+            return
+
+        # Stop any currently playing audio
+        if self.current_player and self.current_player.poll() is None:
+            self.current_player.terminate()
+        self.current_player = None
+
+        # Non-blocking playback using same fallback chain as DesktopIntegration
+        import subprocess
+        players = [
+            ['paplay', str(audio_path)],
+            ['ffplay', '-nodisp', '-autoexit', str(audio_path)],
+            ['aplay', str(audio_path)],
+        ]
+        for player_cmd in players:
+            try:
+                self.current_player = subprocess.Popen(
+                    player_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return
+            except FileNotFoundError:
+                continue
+
     def update_display(self):
         """Update the TUI display."""
         with self.display_lock:
@@ -2351,29 +2399,34 @@ class HotkeyListeningTUI:
 
             # Header with rounded box
             backend = self.app.config.get('backend', 'vosk').upper()
-            status = "🔴 RECORDING" if self.app.audio_processor.is_recording else "🟢 READY"
+            if self.app.audio_processor.is_recording:
+                status = "\033[1;31m\uf111\033[0m REC"
+                status_visual_len = len(" REC") + 2  # icon(1) + space + "REC" + color codes ignored
+            else:
+                status = "\033[1;32m\uf111\033[0m READY"
+                status_visual_len = len(" READY") + 2
 
             print("╭" + "─" * 68 + "╮")
-            line1 = f"Voice Transcriber - {backend} Backend"
-            print(f"│  {line1:<66}│")
-            # Status line - emoji takes 2 visual chars but len counts as 1
+            line1 = f"\ue795  Voice Transcriber - {backend} Backend"
+            # \ue795 is 1 visual col wide, pad accordingly
+            print(f"│  {line1:<67}│")
+            # Status line - Nerd Font icon is 1 visual col, ANSI codes are zero-width
             line2_text = f"Status: {status}"
-            # Calculate padding accounting for emoji width (add back 1 less space)
-            padding2 = 66 - len(line2_text) - 1
+            padding2 = 66 - len("Status: ") - status_visual_len
             print(f"│  {line2_text}{' ' * padding2}│")
             print("├" + "─" * 68 + "┤")
-            line3 = "Hotkey: SUPER+A (start/stop recording)"
-            print(f"│  {line3:<66}│")
-            line4 = "Controls: Ctrl+C (quit) | C (config) | D (delete) | M (mic test)"
-            print(f"│  {line4:<66}│")
+            line3 = "\uf11c  Hotkey: SUPER+A (start/stop recording)"
+            print(f"│  {line3:<67}│")
+            line4 = "\uf013  C (config) | \uf1f8  D (delete) | \uf130  M (mic) | \uf04b  1-5 (play)"
+            print(f"│  {line4:<73}│")
             print("├" + "─" * 68 + "┤")
             # Show current microphone
             mic_device = self.app.config.get('microphone_device', 'pyaudio:0')
             mic_name = self._get_microphone_name(mic_device)
-            line5 = f"Mic: {mic_name}"
-            if len(line5) > 66:
-                line5 = line5[:63] + "..."
-            print(f"│  {line5:<66}│")
+            line5 = f"\uf130  {mic_name}"
+            if len(line5) > 67:
+                line5 = line5[:64] + "..."
+            print(f"│  {line5:<67}│")
             print("╰" + "─" * 68 + "╯")
 
             # Get recent transcriptions from log
@@ -2393,38 +2446,46 @@ class HotkeyListeningTUI:
                             continue
                         lines = block.split('\n')
                         if len(lines) >= 2:
-                            # Extract timestamp from first line: [2025-10-08 22:08:05]
+                            # Extract timestamp from first line: [2025-10-08 22:08:05] recording_xxx.wav
                             timestamp_line = lines[0]
                             if '[' in timestamp_line and ']' in timestamp_line:
                                 timestamp = timestamp_line[timestamp_line.find('[')+1:timestamp_line.find(']')]
+                                # Extract audio filename (text after '] ')
+                                after_bracket = timestamp_line[timestamp_line.find(']')+1:].strip()
+                                audio_file = after_bracket if after_bracket else ''
                                 # Extract text from "Text: ..." line
                                 text_line = lines[1] if len(lines) > 1 else ""
                                 if text_line.startswith('Text: '):
                                     text = text_line[6:].strip()
-                                    entries.append({'timestamp': timestamp, 'text': text})
+                                    entries.append({'timestamp': timestamp, 'text': text, 'audio_file': audio_file})
 
                     if entries:
                         has_transcriptions = True
 
+                        # Build playable history list (all entries, latest last)
+                        history_count = min(5, len(entries) - 1)
+                        history_slice = entries[-history_count-1:-1] if len(entries) > 1 else []
+                        # Store all displayed entries (history + latest) for playback by key
+                        self.history_entries = history_slice + [entries[-1]]
+
                         # Show last 5 transcriptions as history (not including latest)
                         if len(entries) > 1:
                             # Title with color (cyan/blue) - centered to 70 chars
-                            title = "Transcription History (Latest 5)"
-                            # Calculate dashes on each side to center (70 total width)
-                            # Title is 35 chars, so (70 - 35) / 2 = 17.5, use 17 and 18
+                            title = "\uf017  Transcription History"
                             left_dashes = "━" * 17
                             right_dashes = "━" * 18
                             print(f"\n\033[1;36m{left_dashes} {title} {right_dashes}\033[0m")
 
                             # History entries - NO card, just text for easy copy/paste
-                            history_count = min(5, len(entries) - 1)
-                            for idx, entry in enumerate(entries[-history_count-1:-1], 1):
+                            for idx, entry in enumerate(history_slice, 1):
                                 timestamp = entry['timestamp']
                                 text = entry['text']
                                 time_only = timestamp.split()[1] if ' ' in timestamp else timestamp
+                                has_audio = bool(entry.get('audio_file'))
 
-                                # Timestamp on its own line
-                                print(f"[{time_only}]")
+                                # Timestamp + play hint on its own line
+                                play_hint = f" \033[1;33m\uf04b press {idx}\033[0m" if has_audio else ""
+                                print(f"[{time_only}]{play_hint}")
 
                                 # Full text below with word wrap (no box borders)
                                 words = text.split()
@@ -2443,9 +2504,13 @@ class HotkeyListeningTUI:
 
                         # Show latest transcription at the bottom
                         latest = entries[-1]
+                        latest_idx = len(self.history_entries)  # 1-based index for latest
                         text = latest['text']
 
-                        print("\n╭─ Latest Transcription ─" + "─" * 44 + "╮")
+                        play_label = f" \uf04b press {latest_idx}" if latest.get('audio_file') else ""
+                        latest_title = f"─ Latest Transcription{play_label} ─"
+                        right_pad = "─" * max(0, 67 - len(latest_title))
+                        print(f"\n╭{latest_title}{right_pad}╮")
                         # Word wrap with proper box formatting
                         words = text.split()
                         line = ""
@@ -2458,7 +2523,7 @@ class HotkeyListeningTUI:
                         if line.strip():
                             print(f"│ {line.strip():<66} │")
                         print("╰" + "─" * 68 + "╯")
-                        print("✓ Copied to clipboard")
+                        print("\uf00c Copied to clipboard")
 
             except Exception as e:
                 logging.error(f"Error reading log: {e}")
