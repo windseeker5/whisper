@@ -2406,27 +2406,29 @@ class HotkeyListeningTUI:
                 status = "\033[1;32m\uf111\033[0m READY"
                 status_visual_len = len(" READY") + 2
 
+            # Each Nerd Font icon renders 2 visual cols but counts as 1 char in len().
+            # So for N icons on a line, use :<(66 - N)> to keep the right border aligned.
             print("╭" + "─" * 68 + "╮")
             line1 = f"\ue795  Voice Transcriber - {backend} Backend"
-            # \ue795 is 1 visual col wide, pad accordingly
-            print(f"│  {line1:<67}│")
-            # Status line - Nerd Font icon is 1 visual col, ANSI codes are zero-width
+            print(f"│  {line1:<65}│")
+            # Status line: \uf111 is double-wide + ANSI codes are zero-width
             line2_text = f"Status: {status}"
-            padding2 = 66 - len("Status: ") - status_visual_len
+            padding2 = 65 - len("Status: ") - status_visual_len
             print(f"│  {line2_text}{' ' * padding2}│")
             print("├" + "─" * 68 + "┤")
             line3 = "\uf11c  Hotkey: SUPER+A (start/stop recording)"
-            print(f"│  {line3:<67}│")
-            line4 = "\uf013  C (config) | \uf1f8  D (delete) | \uf130  M (mic) | \uf04b  1-5 (play)"
-            print(f"│  {line4:<73}│")
+            print(f"│  {line3:<65}│")
+            # line4 has 4 icons → subtract 4
+            line4 = "\uf013  C (config) | \uf1f8  D (delete) | \uf130  M (mic) | \uf001  1-5 (play)"
+            print(f"│  {line4:<62}│")
             print("├" + "─" * 68 + "┤")
-            # Show current microphone
+            # Show current microphone — 1 icon → subtract 1
             mic_device = self.app.config.get('microphone_device', 'pyaudio:0')
             mic_name = self._get_microphone_name(mic_device)
             line5 = f"\uf130  {mic_name}"
-            if len(line5) > 67:
-                line5 = line5[:64] + "..."
-            print(f"│  {line5:<67}│")
+            if len(line5) > 65:
+                line5 = line5[:62] + "..."
+            print(f"│  {line5:<65}│")
             print("╰" + "─" * 68 + "╯")
 
             # Get recent transcriptions from log
@@ -2484,7 +2486,7 @@ class HotkeyListeningTUI:
                                 has_audio = bool(entry.get('audio_file'))
 
                                 # Timestamp + play hint on its own line
-                                play_hint = f" \033[1;33m\uf04b press {idx}\033[0m" if has_audio else ""
+                                play_hint = f" \033[1;32m\uf001 press {idx}\033[0m" if has_audio else ""
                                 print(f"[{time_only}]{play_hint}")
 
                                 # Full text below with word wrap (no box borders)
@@ -2507,7 +2509,7 @@ class HotkeyListeningTUI:
                         latest_idx = len(self.history_entries)  # 1-based index for latest
                         text = latest['text']
 
-                        play_label = f" \uf04b press {latest_idx}" if latest.get('audio_file') else ""
+                        play_label = f" \uf001 press {latest_idx}" if latest.get('audio_file') else ""
                         latest_title = f"─ Latest Transcription{play_label} ─"
                         right_pad = "─" * max(0, 67 - len(latest_title))
                         print(f"\n╭{latest_title}{right_pad}╮")
