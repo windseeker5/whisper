@@ -1,6 +1,6 @@
 /rec
 /log
-/config
+config/whisper_config.json
 #/bin
 models/
 __pycache__/

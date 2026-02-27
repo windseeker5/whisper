@@ -1,5 +1,5 @@
 {
-  "microphone_device": "pyaudio:5",
+  "microphone_device": "pyaudio:0",
   "whisper_model": "tiny",
   "language": "en",
   "sample_rate": 16000,
